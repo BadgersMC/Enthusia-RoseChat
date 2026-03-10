@@ -39,10 +39,11 @@ public class JoinMessageManager extends Manager {
                 continue;
 
             for (String location : section.getKeys(false)) {
+                ConfigurationSection locationSection = section.getConfigurationSection(location);
+                if (locationSection == null)
+                    continue;
                 String conditionStr = section.getString(location + ".condition");
-                PlaceholderCondition condition = ConditionManager.getCondition(
-                        section.getConfigurationSection(location), conditionStr
-                ).parseValues();
+                PlaceholderCondition condition = ConditionManager.getCondition(locationSection, conditionStr).parseValues();
                 placeholder.add(location, condition);
             }
 
