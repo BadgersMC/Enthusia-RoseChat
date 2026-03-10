@@ -7,7 +7,10 @@ import dev.rosewood.rosechat.chat.channel.Channel;
 import dev.rosewood.rosechat.config.Settings;
 import dev.rosewood.rosechat.hook.channel.rosechat.GroupChannel;
 import dev.rosewood.rosechat.manager.ChannelManager;
+import dev.rosewood.rosechat.manager.JoinMessageManager;
 import dev.rosewood.rosechat.manager.PlayerDataManager;
+import dev.rosewood.rosechat.placeholder.CustomPlaceholder;
+import dev.rosewood.rosechat.placeholder.condition.PlaceholderCondition;
 import dev.rosewood.rosechat.message.RosePlayer;
 import dev.rosewood.rosegarden.utils.NMSUtil;
 import dev.rosewood.rosegarden.utils.StringPlaceholders;
@@ -80,13 +83,35 @@ public class PlayerListener implements Listener {
         });
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.NORMAL)
     public void onPlayerJoin(PlayerJoinEvent event) {
-        if (NMSUtil.getVersionNumber() < 19 || !Settings.ALLOW_CHAT_SUGGESTIONS.get())
-            return;
+        RosePlayer joiningPlayer = new RosePlayer(event.getPlayer());
 
-        RosePlayer player = new RosePlayer(event.getPlayer());
-        player.validateChatCompletion();
+        // Suppress the vanilla join message.
+        event.setJoinMessage(null);
+
+        // Broadcast custom join messages to all online players.
+        JoinMessageManager joinMessageManager = this.plugin.getManager(JoinMessageManager.class);
+        RoseChatAPI api = RoseChatAPI.getInstance();
+
+        for (CustomPlaceholder joinMessage : joinMessageManager.getJoinMessages()) {
+            PlaceholderCondition messageCondition = joinMessage.get("message");
+            if (messageCondition == null)
+                continue;
+
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                RosePlayer viewer = new RosePlayer(online);
+                List<String> lines = messageCondition.parseToStringList(
+                        joiningPlayer, viewer, StringPlaceholders.builder().build());
+                for (String line : lines) {
+                    viewer.send(api.parse(joiningPlayer, viewer, line));
+                }
+            }
+        }
+
+        // Handle chat suggestions (MC 1.19+).
+        if (NMSUtil.getVersionNumber() >= 19 && Settings.ALLOW_CHAT_SUGGESTIONS.get())
+            joiningPlayer.validateChatCompletion();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
