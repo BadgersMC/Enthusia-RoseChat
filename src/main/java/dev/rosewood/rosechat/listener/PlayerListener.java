@@ -94,15 +94,18 @@ public class PlayerListener implements Listener {
         JoinMessageManager joinMessageManager = this.plugin.getManager(JoinMessageManager.class);
         RoseChatAPI api = RoseChatAPI.getInstance();
 
+        StringPlaceholders emptyPlaceholders = StringPlaceholders.empty();
+
         for (CustomPlaceholder joinMessage : joinMessageManager.getJoinMessages()) {
             PlaceholderCondition messageCondition = joinMessage.get("message");
             if (messageCondition == null)
                 continue;
 
+            // Includes the joining player — at NORMAL priority they are already in getOnlinePlayers().
             for (Player online : Bukkit.getOnlinePlayers()) {
                 RosePlayer viewer = new RosePlayer(online);
                 List<String> lines = messageCondition.parseToStringList(
-                        joiningPlayer, viewer, StringPlaceholders.builder().build());
+                        joiningPlayer, viewer, emptyPlaceholders);
                 for (String line : lines) {
                     viewer.send(api.parse(joiningPlayer, viewer, line));
                 }
