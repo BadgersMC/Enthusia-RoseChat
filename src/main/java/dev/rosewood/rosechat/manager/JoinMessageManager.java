@@ -42,7 +42,7 @@ public class JoinMessageManager extends Manager {
                 ConfigurationSection locationSection = section.getConfigurationSection(location);
                 if (locationSection == null)
                     continue;
-                String conditionStr = section.getString(location + ".condition");
+                String conditionStr = locationSection.getString("condition");
                 PlaceholderCondition condition = ConditionManager.getCondition(locationSection, conditionStr).parseValues();
                 placeholder.add(location, condition);
             }
