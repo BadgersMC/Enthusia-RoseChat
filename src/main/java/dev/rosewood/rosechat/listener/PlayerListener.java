@@ -9,6 +9,7 @@ import dev.rosewood.rosechat.hook.channel.rosechat.GroupChannel;
 import dev.rosewood.rosechat.manager.ChannelManager;
 import dev.rosewood.rosechat.manager.JoinMessageManager;
 import dev.rosewood.rosechat.manager.PlayerDataManager;
+import dev.rosewood.rosechat.message.contents.MessageContents;
 import dev.rosewood.rosechat.placeholder.CustomPlaceholder;
 import dev.rosewood.rosechat.placeholder.condition.PlaceholderCondition;
 import dev.rosewood.rosechat.message.RosePlayer;
@@ -106,8 +107,12 @@ public class PlayerListener implements Listener {
                 RosePlayer viewer = new RosePlayer(online);
                 List<String> lines = messageCondition.parseToStringList(
                         joiningPlayer, viewer, emptyPlaceholders);
+                if (lines == null || lines.isEmpty())
+                    continue;
                 for (String line : lines) {
-                    viewer.send(api.parse(joiningPlayer, viewer, line));
+                    MessageContents parsed = api.parse(joiningPlayer, viewer, line);
+                    if (parsed != null)
+                        viewer.send(parsed);
                 }
             }
         }

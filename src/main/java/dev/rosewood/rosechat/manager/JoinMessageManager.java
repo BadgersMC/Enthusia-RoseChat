@@ -8,7 +8,7 @@ import dev.rosewood.rosegarden.config.CommentedFileConfiguration;
 import dev.rosewood.rosegarden.manager.Manager;
 import java.io.File;
 import java.util.Collection;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.bukkit.configuration.ConfigurationSection;
 
@@ -18,7 +18,7 @@ public class JoinMessageManager extends Manager {
 
     public JoinMessageManager(RosePlugin rosePlugin) {
         super(rosePlugin);
-        this.joinMessages = new HashMap<>();
+        this.joinMessages = new LinkedHashMap<>();
     }
 
     @Override
