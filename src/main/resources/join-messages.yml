@@ -1,0 +1,23 @@
+# Join messages are sent to all online players when a player joins the server.
+# These replace the vanilla join message.
+# The structure mirrors custom-placeholders.yml.
+#
+# Each top-level key is an entry ID. Multiple entries are all broadcast on join.
+#
+# 'message' defines what is broadcast to online players.
+# It supports conditions, PAPI placeholders (%like_this%), and RoseChat
+# custom placeholders ({like_this}).
+#
+# 'text' and other standard components are also supported but optional.
+
+join-message:
+  # The message broadcast to all online players on join.
+  # Use RoseChat placeholders like {prefix} and {player}.
+  message:
+    condition: "%vault_rank%"
+    mod:
+      - "{prefix}{player} &ahas joined the server! (Mod)"
+    admin:
+      - "{prefix}{player} &ahas joined the server! (Admin)"
+    default:
+      - "{prefix}{player} &ajoined the server."
