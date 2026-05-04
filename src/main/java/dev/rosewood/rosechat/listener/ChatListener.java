@@ -9,6 +9,7 @@ import dev.rosewood.rosechat.config.Settings;
 import dev.rosewood.rosechat.message.MessageUtils;
 import dev.rosewood.rosechat.message.RosePlayer;
 import dev.rosewood.rosegarden.utils.NMSUtil;
+import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -16,6 +17,13 @@ import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.inventory.ItemStack;
 
 public class ChatListener implements Listener {
+
+    /**
+     * Metadata key set by another plugin (e.g. LumaGuilds) to claim a chat message
+     * for routing into its own channel. RoseChat consumes the marker and skips its
+     * pipeline so the message isn't double-broadcast to main chat.
+     */
+    private static final String CHAT_CLAIM_META = "lumaguilds:chat_claimed";
 
     private final RoseChatAPI api;
 
@@ -25,6 +33,14 @@ public class ChatListener implements Listener {
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onChat(AsyncPlayerChatEvent event) {
+        if (event.getPlayer().hasMetadata(CHAT_CLAIM_META)) {
+            org.bukkit.plugin.Plugin claimer = Bukkit.getPluginManager().getPlugin("LumaGuilds");
+            if (claimer != null)
+                event.getPlayer().removeMetadata(CHAT_CLAIM_META, claimer);
+            event.setCancelled(true);
+            return;
+        }
+
         event.setCancelled(true);
 
         RosePlayer player = new RosePlayer(event.getPlayer());
