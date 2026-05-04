@@ -127,6 +127,10 @@ public class ChatListener implements Listener {
         // If the player is somehow not in a channel, find the appropriate channel to put them in.
         if (channel == null) {
             channel = player.findChannel();
+            if (channel == null) {
+                player.sendLocaleMessage("no-channel-available");
+                return;
+            }
             player.switchChannel(channel);
         }
 
