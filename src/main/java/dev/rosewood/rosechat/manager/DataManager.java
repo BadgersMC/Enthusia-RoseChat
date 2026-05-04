@@ -65,6 +65,10 @@ public class DataManager extends AbstractDataManager {
                     boolean isCurrentlyChannelGroupChannel = result.getBoolean("is_currently_in_gc");
                     Channel channel = isCurrentlyChannelGroupChannel ?
                             RoseChatAPI.getInstance().getGroupChatById(currentChannel) : channelManager.getChannel(currentChannel);
+                    // Saved channel may no longer exist (renamed/removed in config) — fall back to default
+                    // so chat dispatch and updatePlayerData don't NPE on a null currentChannel.
+                    if (channel == null)
+                        channel = channelManager.getDefaultChannel();
                     String strippedDisplayName = result.getString("stripped_name");
 
                     playerData = new PlayerData(uuid);
@@ -117,6 +121,16 @@ public class DataManager extends AbstractDataManager {
     }
 
     public void updatePlayerData(PlayerData playerData) {
+        // Self-heal: if currentChannel was somehow nulled (e.g. saved id no longer in config and
+        // an older build skipped the fallback), restore it to the default before writing.
+        if (playerData.getCurrentChannel() == null) {
+            ChannelManager channelManager = this.rosePlugin.getManager(ChannelManager.class);
+            Channel defaultChannel = channelManager.getDefaultChannel();
+            if (defaultChannel == null)
+                return; // no channels configured at all — skip the write rather than NPE
+            playerData.setCurrentChannel(defaultChannel);
+        }
+
         this.databaseConnector.connect(connection -> {
 
             String query = "REPLACE INTO " + this.getTablePrefix() + "player_data (uuid, has_message_spy, has_channel_spy, has_group_spy, " +
