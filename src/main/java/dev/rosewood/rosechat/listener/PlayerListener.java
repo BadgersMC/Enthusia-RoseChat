@@ -8,6 +8,7 @@ import dev.rosewood.rosechat.config.Settings;
 import dev.rosewood.rosechat.hook.channel.rosechat.GroupChannel;
 import dev.rosewood.rosechat.manager.ChannelManager;
 import dev.rosewood.rosechat.manager.JoinMessageManager;
+import dev.rosewood.rosechat.manager.LeaveMessageManager;
 import dev.rosewood.rosechat.manager.PlayerDataManager;
 import dev.rosewood.rosechat.message.contents.MessageContents;
 import dev.rosewood.rosechat.placeholder.CustomPlaceholder;
@@ -124,19 +125,47 @@ public class PlayerListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
-        RosePlayer player = new RosePlayer(event.getPlayer());
+        RosePlayer leavingPlayer = new RosePlayer(event.getPlayer());
+
+        // Suppress the vanilla quit message.
+        event.setQuitMessage(null);
+
+        // Broadcast custom leave messages to all remaining online players.
+        LeaveMessageManager leaveMessageManager = this.plugin.getManager(LeaveMessageManager.class);
+        RoseChatAPI rcApi = RoseChatAPI.getInstance();
+
+        StringPlaceholders emptyPlaceholders = StringPlaceholders.empty();
+
+        for (CustomPlaceholder leaveMessage : leaveMessageManager.getLeaveMessages()) {
+            PlaceholderCondition messageCondition = leaveMessage.get("message");
+            if (messageCondition == null)
+                continue;
+
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                RosePlayer viewer = new RosePlayer(online);
+                List<String> lines = messageCondition.parseToStringList(
+                        leavingPlayer, viewer, emptyPlaceholders);
+                if (lines == null || lines.isEmpty())
+                    continue;
+                for (String line : lines) {
+                    MessageContents parsed = rcApi.parse(leavingPlayer, viewer, line);
+                    if (parsed != null)
+                        viewer.send(parsed);
+                }
+            }
+        }
 
         PlayerDataManager playerDataManager = this.plugin.getManager(PlayerDataManager.class);
-        playerDataManager.getPlayerData(player.getUUID()).save();
-        playerDataManager.getPlayerData(player.getUUID()).getCurrentChannel().onLeave(player);
+        playerDataManager.getPlayerData(leavingPlayer.getUUID()).save();
+        playerDataManager.getPlayerData(leavingPlayer.getUUID()).getCurrentChannel().onLeave(leavingPlayer);
 
         // Delay unloading to keep data cached while the player is leaving.
         Bukkit.getScheduler().runTaskLaterAsynchronously(RoseChat.getInstance(), () -> {
-            if (!player.asPlayer().isOnline())
-                playerDataManager.unloadPlayerData(player.getUUID());
+            if (!leavingPlayer.asPlayer().isOnline())
+                playerDataManager.unloadPlayerData(leavingPlayer.getUUID());
         }, 20L * 30L);
 
-        GroupChannel group = player.getOwnedGroupChannel();
+        GroupChannel group = leavingPlayer.getOwnedGroupChannel();
         if (group == null)
             return;
 

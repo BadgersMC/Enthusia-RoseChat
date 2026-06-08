@@ -1,0 +1,23 @@
+# Leave messages are sent to all online players when a player leaves the server.
+# These replace the vanilla quit message.
+# The structure mirrors join-messages.yml and custom-placeholders.yml.
+#
+# Each top-level key is an entry ID. Multiple entries are all broadcast on quit.
+#
+# 'message' defines what is broadcast to remaining online players.
+# It supports conditions, PAPI placeholders (%like_this%), and RoseChat
+# custom placeholders ({like_this}).
+#
+# 'text' and other standard components are also supported but optional.
+
+leave-message:
+  # The message broadcast to all online players on quit.
+  # Use RoseChat placeholders like {prefix} and {player}.
+  message:
+    condition: "%vault_rank%"
+    mod:
+      - "{prefix}{player} &chas left the server. (Mod)"
+    admin:
+      - "{prefix}{player} &chas left the server. (Admin)"
+    default:
+      - "{prefix}{player} &cleft the server."
