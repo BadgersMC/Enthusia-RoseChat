@@ -38,6 +38,7 @@ import dev.rosewood.rosechat.manager.DiscordEmojiManager;
 import dev.rosewood.rosechat.manager.FilterManager;
 import dev.rosewood.rosechat.manager.GroupManager;
 import dev.rosewood.rosechat.manager.JoinMessageManager;
+import dev.rosewood.rosechat.manager.LeaveMessageManager;
 import dev.rosewood.rosechat.manager.LocaleManager;
 import dev.rosewood.rosechat.manager.PlaceholderManager;
 import dev.rosewood.rosechat.manager.PlayerDataManager;
@@ -178,6 +179,7 @@ public class RoseChat extends RosePlugin {
                 FilterManager.class,
                 PlaceholderManager.class,
                 JoinMessageManager.class,
+                LeaveMessageManager.class,
                 PlayerDataManager.class,
                 GroupManager.class,
                 DiscordEmojiManager.class,
