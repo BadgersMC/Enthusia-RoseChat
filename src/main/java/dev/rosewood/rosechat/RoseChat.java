@@ -10,6 +10,7 @@ import dev.rosewood.rosechat.hook.channel.fabledskyblock.FabledSkyblockChannelPr
 import dev.rosewood.rosechat.hook.channel.factionsuuid.FactionsUUIDChannelProvider;
 import dev.rosewood.rosechat.hook.channel.husktowns.HuskTownsChannelProvider;
 import dev.rosewood.rosechat.hook.channel.kingdomsx.KingdomsXChannelProvider;
+import dev.rosewood.rosechat.hook.channel.lumaguilds.LumaGuildsChannelProvider;
 import dev.rosewood.rosechat.hook.channel.marriagemaster.MarriageMasterChannelProvider;
 import dev.rosewood.rosechat.hook.channel.mcmmo.McMMOChannelProvider;
 import dev.rosewood.rosechat.hook.channel.rosechat.RoseChatChannelProvider;
@@ -255,6 +256,9 @@ public class RoseChat extends RosePlugin {
 
         if (pluginManager.getPlugin("HuskTowns") != null)
             new HuskTownsChannelProvider().register();
+
+        if (pluginManager.getPlugin("LumaGuilds") != null)
+            new LumaGuildsChannelProvider().register();
     }
 
     public Permission getVault() {

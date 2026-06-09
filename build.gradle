@@ -89,6 +89,10 @@ dependencies {
         exclude group: 'org.spigotmc'
     }
     compileOnly 'net.william278.husktowns:husktowns-bukkit:3.1.4'
+    // LumaGuilds is not publicly available on a Maven repo. Drop the built jar into
+    // libs/ from the LumaGuilds project (libs/ is gitignored).
+    compileOnly files('libs/LumaGuilds-2.1.0.jar')
+    compileOnly 'org.jetbrains.kotlin:kotlin-stdlib:2.0.0'
 }
 
 processResources {
