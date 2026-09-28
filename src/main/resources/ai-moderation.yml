@@ -34,4 +34,5 @@ policy:
   illicit-violent: 0.92
   self-harm-intent-alert: 0.55
 
-staff-status-permission: rosechat.aimoderation.status
+# Reuse RoseChat's existing staff-facing blocked-message permission by default.
+staff-status-permission: rosechat.seeblocked
