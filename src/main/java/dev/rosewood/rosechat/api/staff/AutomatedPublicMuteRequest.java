@@ -20,7 +20,7 @@ public record AutomatedPublicMuteRequest(
         Objects.requireNonNull(muteDuration, "muteDuration");
         targetName = bounded(targetName, "targetName", 64);
         category = bounded(category, "category", 96);
-        idempotencyKey = bounded(idempotencyKey, "idempotencyKey", 160);
+        idempotencyKey = bounded(idempotencyKey, "idempotencyKey", 128);
         if (severity < 0 || severity > 100 || strikeCount < 1) {
             throw new IllegalArgumentException("invalid automated moderation severity/strike count");
         }
