@@ -11,6 +11,7 @@ RoseChat can optionally classify player-originated public chat with OpenAI's mod
 - Treat OpenAI category scores as signals. RoseChat's Minecraft-specific policy decides whether to allow, review, or delete a message.
 - Notify the sender when an enforcement-level flag blocks or deletes a message.
 - Count only enforcement-level flags as strikes. Two strikes in a rolling hour request a 30-day public mute from EnthusiaStaff.
+- Persist the rolling strike window across RoseChat restarts without making RoseChat the punishment authority.
 - Warn staff on every login while moderation is configured/enabled but unhealthy.
 
 ## Context model
@@ -22,13 +23,13 @@ Each initial moderation request carries two independent text inputs:
 
 The transcript uses explicit target markers and metadata, including the target index and whether the target is currently at the start, middle, or end of the available window. Keeping the target-only input separate prevents harmful text in neighboring messages from being attributed directly to the target.
 
-A short follow-up context window may be used for ambiguous messages after later chat arrives. The target remains explicitly marked and can therefore move from `END` to `MIDDLE`/`START`. Follow-up context is corroborating evidence only; neighboring content alone must not create a strike for an otherwise clean target.
+A short follow-up context window may be used when the target itself is already near an Enthusia enforcement threshold and later chat arrives. The target remains explicitly marked and can therefore move from `END` to `MIDDLE`/`START`. Follow-up context is corroborating evidence only; neighboring content alone must not create a strike for an otherwise clean target. A high generic `violence` score by itself does not trigger the follow-up request.
 
 ## Minecraft-specific policy
 
-The endpoint's top-level `flagged` value is not the deletion switch. In particular, generic `violence` is heavily discounted because normal gameplay includes language such as `I killed him`, `die`, `fight me`, and `I'm going to kill you` in an in-game context.
+The endpoint's top-level `flagged` value is not the deletion switch. In particular, generic `violence` is not an enforcement category because normal gameplay includes language such as `I killed him`, `die`, `fight me`, and `I'm going to kill you` in an in-game context.
 
-More weight is given to targeted harassment, threatening harassment, hate, threatening hate, self-harm instructions, and graphic violence. Thresholds are configuration values and should be tuned in shadow mode before production enforcement.
+More weight is given to targeted harassment, threatening harassment, hate, threatening hate, self-harm instructions, sexual content involving minors, graphic violence, and illicit violent content. Thresholds are configuration values and should be tuned in shadow mode before production enforcement.
 
 A player strike is created only when RoseChat's policy returns `DELETE`, not merely because OpenAI reports `flagged=true` or a high generic-violence score.
 
@@ -40,18 +41,26 @@ For a player-originated public message:
 2. The moderation request starts asynchronously.
 3. If an enforcement decision arrives before 300 ms, RoseChat applies it before broadcast.
 4. If no decision is available at 300 ms, RoseChat broadcasts normally.
-5. A later enforcement decision deletes the already-published message where supported and notifies the sender.
+5. A later enforcement decision deletes the already-published message only when RoseChat can uniquely resolve that exact message UUID, then notifies the sender.
 
-An atomic message lifecycle prevents a response racing the timeout from broadcasting or enforcing twice.
+An atomic message lifecycle prevents a response racing the timeout from broadcasting or enforcing twice. If late deletion cannot uniquely identify the target message, RoseChat refuses to guess and alerts staff instead of deleting a different message.
+
+## Strike persistence
+
+Only `DELETE` decisions enter the strike ledger. The ledger stores bounded rolling timestamps in `ai-moderation-strikes.tsv` under RoseChat's data directory and uses an atomic file replacement where the filesystem supports it. Expired timestamps are discarded when the ledger is read or updated.
+
+The ledger exists only to preserve the one-hour escalation window across RoseChat restarts. It is not a punishment database. EnthusiaStaff remains authoritative for the resulting case and sanction.
 
 ## Failure behavior
 
 Moderation is a soft subsystem. It has no authority to take chat down.
 
-Repeated remote failures open a circuit breaker. While open, messages are sent without AI moderation and periodic probes are allowed to determine when service has recovered. Staff with the AI moderation status permission are warned on login while the subsystem is degraded/down.
+Repeated remote failures open a circuit breaker. While open, messages are sent without AI moderation. After the configured open interval expires, the next eligible public message is allowed to test the remote service again. Staff with the AI moderation status permission are warned on login while the subsystem is degraded/down.
 
 ## EnthusiaStaff integration
 
-RoseChat does not dispatch punishment command strings. An optional integration contract is used so EnthusiaStaff remains the punishment authority. RoseChat reports enforcement-level strikes with an idempotency key and moderation metadata; EnthusiaStaff owns the durable strike history and the resulting 30-day public mute when the second strike occurs inside the rolling one-hour window.
+RoseChat does not dispatch punishment command strings. An optional integration contract is used so EnthusiaStaff remains the punishment authority. RoseChat owns only the persisted rolling enforcement-strike timestamps and submits a mute request with an idempotency key and moderation metadata after the configured threshold is reached.
 
-If EnthusiaStaff is absent or the integration is unavailable, chat moderation still works. RoseChat records/alerts that automatic sanction escalation is unavailable rather than substituting another punishment implementation.
+EnthusiaStaff owns the durable public case and sanction. The companion integration uses a dedicated `chat.ai-moderation` policy and a 30-day public-chat-only mute: public chat is blocked while private messages remain available. Staff also checks for an already-active public mute before creating another case.
+
+If EnthusiaStaff is absent or the integration is unavailable, chat moderation still works. RoseChat alerts that automatic sanction escalation is unavailable rather than substituting another punishment implementation.
