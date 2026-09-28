@@ -99,7 +99,7 @@ public record AiModerationConfig(
                 boundedThreshold("corroboration-floor-ratio", yaml.getDouble("policy.corroboration-floor-ratio", 0.75)),
                 thresholds,
                 boundedThreshold("self-harm-intent-alert", yaml.getDouble("policy.self-harm-intent-alert", 0.55)),
-                nonBlank(yaml.getString("staff-status-permission"), "rosechat.aimoderation.status")
+                nonBlank(yaml.getString("staff-status-permission"), "rosechat.seeblocked")
         );
     }
 
