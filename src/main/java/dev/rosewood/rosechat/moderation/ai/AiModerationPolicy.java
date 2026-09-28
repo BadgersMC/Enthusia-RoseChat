@@ -38,13 +38,13 @@ public final class AiModerationPolicy {
 
         String strongestCategory = strongestCategory(batch.target());
         double strongestScore = strongestCategory.isEmpty() ? 0.0D : batch.target().score(strongestCategory);
-        boolean ambiguous = batch.target().flagged() || nearDeleteThreshold(batch.target());
+        boolean followUpUseful = nearDeleteThreshold(batch.target());
         return new Verdict(
                 Action.ALLOW,
                 strongestCategory.isEmpty() ? "none" : strongestCategory,
                 strongestScore,
                 0,
-                ambiguous
+                followUpUseful
         );
     }
 
