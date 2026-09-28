@@ -17,7 +17,6 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
@@ -144,11 +143,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
     }
 
     private boolean circuitOpen() {
-        Instant until = this.circuitOpenUntil;
-        if (!until.isAfter(clock.instant())) {
-            return false;
-        }
-        return true;
+        return this.circuitOpenUntil.isAfter(clock.instant());
     }
 
     private void applyVerdict(
@@ -227,7 +222,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
             pending.deleteRequested.set(true);
             UUID messageId = pending.publishedMessageId.get();
             if (messageId != null) {
-                deletePublished(messageId);
+                deletePublishedOnce(pending, messageId);
             }
             notifyPlayer(pending.senderId, enforcementNotice("removed", verdict));
         }
@@ -255,8 +250,8 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         }
         if (count < config.requiredStrikes()) {
             notifyPlayer(pending.senderId, "AI moderation strike " + count + "/" + config.requiredStrikes()
-                    + ". A second enforcement within " + config.strikeWindow().toMinutes()
-                    + " minutes results in a 30-day public mute.");
+                    + ". Another enforcement within " + config.strikeWindow().toMinutes()
+                    + " minutes can result in a " + config.muteDuration().toDays() + "-day public mute.");
             return;
         }
         Instant existing = muteRequestedUntil.get(pending.senderId);
@@ -294,14 +289,15 @@ public final class AiModerationManager implements AutoCloseable, Listener {
             result = service.applyPublicMute(request);
         } catch (RuntimeException | LinkageError exception) {
             plugin.getLogger().warning("EnthusiaStaff automated public mute failed: " + exception.getClass().getSimpleName());
-            alertStaff("AI moderation could not apply the 30-day public mute for " + pending.senderName
-                    + "; EnthusiaStaff integration failed.");
+            alertStaff("AI moderation could not apply the " + config.muteDuration().toDays()
+                    + "-day public mute for " + pending.senderName + "; EnthusiaStaff integration failed.");
             return;
         }
         if (result != null && result.status() == AutomatedModerationResult.Status.APPLIED) {
             muteRequestedUntil.put(pending.senderId, now.plus(config.muteDuration()));
-            notifyPlayer(pending.senderId, "You have been publicly muted for 30 days after " + count
-                    + " AI moderation enforcement strikes within " + config.strikeWindow().toMinutes() + " minutes.");
+            notifyPlayer(pending.senderId, "You have been publicly muted for " + config.muteDuration().toDays()
+                    + " days after " + count + " AI moderation enforcement strikes within "
+                    + config.strikeWindow().toMinutes() + " minutes.");
             alertStaff("EnthusiaStaff applied the AI moderation public mute for " + pending.senderName + ".");
         } else {
             String detail = result == null ? "no result" : result.status() + ": " + result.detail();
@@ -312,27 +308,28 @@ public final class AiModerationManager implements AutoCloseable, Listener {
 
     private void resolvePublishedMessageId(PendingMessage pending, int attempt) {
         Bukkit.getScheduler().runTask(plugin, () -> {
-            UUID resolved = newestNewMessageId(pending);
+            UUID resolved = uniqueNewMessageId(pending);
             if (resolved != null) {
                 pending.publishedMessageId.compareAndSet(null, resolved);
                 if (pending.deleteRequested.get()) {
-                    deletePublished(resolved);
+                    deletePublishedOnce(pending, resolved);
                 }
                 return;
             }
             if (attempt < 8) {
                 scheduler.schedule(() -> resolvePublishedMessageId(pending, attempt + 1), 50, TimeUnit.MILLISECONDS);
             } else if (pending.deleteRequested.get()) {
-                alertStaff("AI moderation flagged a message after broadcast, but RoseChat could not identify its message UUID for late deletion.");
+                alertStaff("AI moderation flagged a message after broadcast, but RoseChat could not uniquely identify its message UUID for late deletion.");
             }
         });
     }
 
-    private UUID newestNewMessageId(PendingMessage pending) {
+    private UUID uniqueNewMessageId(PendingMessage pending) {
         if (pending.options.sender().getPlayerData() == null) {
             return null;
         }
         java.util.List<DeletableMessage> messages = pending.options.sender().getPlayerData().getMessageLog().getDeletableMessages();
+        UUID candidate = null;
         synchronized (messages) {
             for (int i = messages.size() - 1; i >= 0; i--) {
                 DeletableMessage message = messages.get(i);
@@ -343,10 +340,13 @@ public final class AiModerationManager implements AutoCloseable, Listener {
                         || !Objects.equals(message.getChannel(), pending.channel.getId())) {
                     continue;
                 }
-                return message.getUUID();
+                if (candidate != null && !candidate.equals(message.getUUID())) {
+                    return null;
+                }
+                candidate = message.getUUID();
             }
         }
-        return null;
+        return candidate;
     }
 
     private static Set<UUID> messageIds(RosePlayer player) {
@@ -361,6 +361,13 @@ public final class AiModerationManager implements AutoCloseable, Listener {
             }
         }
         return ids;
+    }
+
+    private void deletePublishedOnce(PendingMessage pending, UUID messageId) {
+        if (!pending.deletionDispatched.compareAndSet(false, true)) {
+            return;
+        }
+        deletePublished(messageId);
     }
 
     private void deletePublished(UUID messageId) {
@@ -399,7 +406,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
 
     private static String rootType(Throwable throwable) {
         Throwable current = throwable;
-        while ((current instanceof CompletionException) && current.getCause() != null) {
+        while (current instanceof CompletionException && current.getCause() != null) {
             current = current.getCause();
         }
         return current.getClass().getSimpleName();
@@ -479,6 +486,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         private final AtomicReference<MessageState> state = new AtomicReference<>(MessageState.PENDING);
         private final AtomicBoolean enforced = new AtomicBoolean();
         private final AtomicBoolean deleteRequested = new AtomicBoolean();
+        private final AtomicBoolean deletionDispatched = new AtomicBoolean();
         private final AtomicReference<UUID> publishedMessageId = new AtomicReference<>();
         private final Set<UUID> beforeMessageIds = ConcurrentHashMap.newKeySet();
 
