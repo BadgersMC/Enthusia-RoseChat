@@ -82,7 +82,7 @@ dependencies {
 
     // Plugin Support
     compileOnly 'com.palmergames.bukkit.towny:towny:0.100.3.0'
-    compileOnly 'com.gmail.nossr50:mcMMO:2.2.012'
+    compileOnly 'com.gmail.nossr50.mcMMO:mcMMO:2.2.012'
     compileOnly 'com.sk89q.worldguard:worldguard-bukkit:7.0.0', {
         exclude group: 'org.bukkit'
     }
