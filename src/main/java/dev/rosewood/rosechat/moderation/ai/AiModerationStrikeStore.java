@@ -56,17 +56,6 @@ final class AiModerationStrikeStore {
         return playerStrikes == null ? 0 : playerStrikes.size();
     }
 
-    synchronized Instant firstStrike(UUID playerId) {
-        Objects.requireNonNull(playerId, "playerId");
-        Instant now = clock.instant();
-        pruneAll(now);
-        Deque<Instant> playerStrikes = strikes.get(playerId);
-        if (playerStrikes == null || playerStrikes.isEmpty()) {
-            throw new IllegalStateException("player has no active AI moderation strikes");
-        }
-        return playerStrikes.peekFirst();
-    }
-
     private void load() {
         if (!Files.isRegularFile(file)) {
             return;
