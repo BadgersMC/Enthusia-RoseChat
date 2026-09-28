@@ -14,9 +14,7 @@ import dev.rosewood.rosechat.message.RosePlayer;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
@@ -43,12 +41,12 @@ public final class AiModerationManager implements AutoCloseable, Listener {
     private final ScheduledExecutorService scheduler;
     private final AtomicReference<Health> health = new AtomicReference<>(Health.disabled());
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
-    private final Map<UUID, Deque<Instant>> strikes = new ConcurrentHashMap<>();
     private final Map<UUID, Instant> muteRequestedUntil = new ConcurrentHashMap<>();
     private volatile Instant circuitOpenUntil = Instant.EPOCH;
     private volatile AiModerationConfig config;
     private volatile AiModerationContextBuffer context;
     private volatile AiModerationPolicy policy;
+    private volatile AiModerationStrikeStore strikeStore;
     private volatile OpenAiModerationClient client;
 
     public AiModerationManager(RoseChat plugin) {
@@ -72,6 +70,12 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         this.config = loaded;
         this.context = new AiModerationContextBuffer(clock, loaded);
         this.policy = new AiModerationPolicy(loaded);
+        this.strikeStore = new AiModerationStrikeStore(
+                plugin.getDataFolder().toPath().resolve("ai-moderation-strikes.tsv"),
+                clock,
+                loaded.strikeWindow(),
+                plugin.getLogger()
+        );
         this.consecutiveFailures.set(0);
         this.circuitOpenUntil = Instant.EPOCH;
         if (!loaded.enabled()) {
@@ -238,16 +242,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
 
     private void recordStrike(PendingMessage pending, AiModerationPolicy.Verdict verdict) {
         Instant now = clock.instant();
-        Deque<Instant> playerStrikes = strikes.computeIfAbsent(pending.senderId, ignored -> new ArrayDeque<>());
-        int count;
-        synchronized (playerStrikes) {
-            Instant cutoff = now.minus(config.strikeWindow());
-            while (!playerStrikes.isEmpty() && playerStrikes.peekFirst().isBefore(cutoff)) {
-                playerStrikes.removeFirst();
-            }
-            playerStrikes.addLast(now);
-            count = playerStrikes.size();
-        }
+        int count = this.strikeStore.record(pending.senderId);
         if (count < config.requiredStrikes()) {
             notifyPlayer(pending.senderId, "AI moderation strike " + count + "/" + config.requiredStrikes()
                     + ". Another enforcement within " + config.strikeWindow().toMinutes()
