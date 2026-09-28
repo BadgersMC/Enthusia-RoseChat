@@ -11,7 +11,7 @@ class AiModerationPolicyTest {
     private final AiModerationPolicy policy = new AiModerationPolicy(AiModerationTestConfig.create());
 
     @Test
-    void genericMinecraftViolenceDoesNotDelete() {
+    void genericMinecraftViolenceDoesNotDeleteOrRequestFollowUp() {
         AiModerationPolicy.Verdict verdict = policy.evaluate(batch(
                 true,
                 Map.of("violence", 0.999),
@@ -20,7 +20,7 @@ class AiModerationPolicyTest {
 
         assertEquals(AiModerationPolicy.Action.ALLOW, verdict.action());
         assertEquals("violence", verdict.category());
-        assertTrue(verdict.followUpUseful());
+        assertFalse(verdict.followUpUseful());
     }
 
     @Test
@@ -45,6 +45,19 @@ class AiModerationPolicyTest {
         ));
 
         assertEquals(AiModerationPolicy.Action.ALLOW, verdict.action());
+        assertFalse(verdict.followUpUseful());
+    }
+
+    @Test
+    void borderlineEnforceableCategoryRequestsFollowUpContext() {
+        AiModerationPolicy.Verdict verdict = policy.evaluate(batch(
+                false,
+                Map.of("harassment/threatening", 0.50),
+                Map.of("harassment/threatening", 0.50)
+        ));
+
+        assertEquals(AiModerationPolicy.Action.ALLOW, verdict.action());
+        assertTrue(verdict.followUpUseful());
     }
 
     @Test
