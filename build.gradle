@@ -18,11 +18,19 @@ plugins {
 apply plugin: 'com.gradleup.shadow'
 
 group = 'dev.rosewood'
-version = 'RC-2'
+version = 'RC-4'
+
+def lumaGuildsJar = file(System.getenv('LUMAGUILDS_JAR') ?: 'libs/LumaGuilds-2.1.0.jar')
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(21))
     disableAutoTargetJvm()
+}
+
+sourceSets {
+    lumaGuildsApi {
+        java.srcDir 'src/lumaGuildsApi/java'
+    }
 }
 
 compileJava {
@@ -56,8 +64,9 @@ repositories {
 }
 
 dependencies {
-    api 'dev.rosewood:rosegarden:1.5.4'
+    api 'dev.rosewood:rosegarden:1.5.7'
     api 'org.apache.commons:commons-text:1.12.0'
+    implementation 'com.google.code.gson:gson:2.11.0'
 
     compileOnly 'net.kyori:adventure-api:4.25.0'
     compileOnly 'net.md-5:bungeecord-chat:1.21-R0.5-20251216.193400-13'
@@ -91,8 +100,23 @@ dependencies {
     compileOnly 'net.william278.husktowns:husktowns-bukkit:3.1.4'
     // LumaGuilds is not publicly available on a Maven repo. Drop the built jar into
     // libs/ from the LumaGuilds project (libs/ is gitignored).
-    compileOnly files('libs/LumaGuilds-2.1.0.jar')
+    if (lumaGuildsJar.isFile()) {
+        compileOnly files(lumaGuildsJar)
+    } else {
+        compileOnly sourceSets.lumaGuildsApi.output
+    }
     compileOnly 'org.jetbrains.kotlin:kotlin-stdlib:2.0.0'
+
+    testImplementation platform('org.junit:junit-bom:5.12.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT', {
+        exclude group: 'net.md-5'
+    }
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
 }
 
 processResources {
@@ -104,9 +128,10 @@ processResources {
 }
 
 shadowJar {
-    archiveClassifier.set(null);
+    archiveClassifier.set(null)
     relocate('dev.rosewood.rosegarden', 'dev.rosewood.rosechat.lib.rosegarden')
     relocate('org.apache', 'dev.rosewood.rosechat.lib.apache')
+    relocate('com.google.gson', 'dev.rosewood.rosechat.lib.gson')
     minimize()
 }
 

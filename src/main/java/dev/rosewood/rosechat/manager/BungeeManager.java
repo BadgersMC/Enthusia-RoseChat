@@ -17,11 +17,13 @@ import dev.rosewood.rosegarden.manager.Manager;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -29,16 +31,24 @@ import org.bukkit.entity.Player;
 public class BungeeManager extends Manager {
 
     private final Multimap<String, String> bungeePlayers;
-    private final List<String> checkPluginPlayers;
+    private final Map<UUID, Boolean> checkPluginResponses;
+    private final Map<String, Boolean> legacyCheckPluginResponses;
+    private final Map<String, Object> pluginCheckLocks;
+    private final Map<UUID, Consumer<Boolean>> directMessageCallbacks;
 
     public BungeeManager(RosePlugin rosePlugin) {
         super(rosePlugin);
 
         this.bungeePlayers = ArrayListMultimap.create();
-        this.checkPluginPlayers = new ArrayList<>();
+        this.checkPluginResponses = new ConcurrentHashMap<>();
+        this.legacyCheckPluginResponses = new ConcurrentHashMap<>();
+        this.pluginCheckLocks = new ConcurrentHashMap<>();
+        this.directMessageCallbacks = new ConcurrentHashMap<>();
 
         if (RoseChatAPI.getInstance().isBungee() && Settings.ALLOW_BUNGEECORD_MESSAGES.get()) {
-            Bukkit.getScheduler().runTaskTimerAsynchronously(rosePlugin, () -> {
+            // Bukkit plugin messages must be sent from the server thread. Keeping the player list
+            // refresh on that thread also means the ArrayListMultimap is never mutated concurrently.
+            Bukkit.getScheduler().runTaskTimer(rosePlugin, () -> {
                 this.bungeePlayers.get("ALL").clear();
                 this.getPlayers("ALL");
             }, 0L, 20L * 5L);
@@ -52,7 +62,10 @@ public class BungeeManager extends Manager {
 
     @Override
     public void disable() {
-
+        this.checkPluginResponses.clear();
+        this.legacyCheckPluginResponses.clear();
+        this.pluginCheckLocks.clear();
+        this.directMessageCallbacks.clear();
     }
 
     /**
@@ -74,15 +87,31 @@ public class BungeeManager extends Manager {
                 out.writeUTF(channel);
 
             if (msgBytes != null && msgOut != null) {
-                out.writeShort(msgBytes.toByteArray().length);
-                out.write(msgBytes.toByteArray());
-            }
+                byte[] payload = msgBytes.toByteArray();
+                if (payload.length > 0xFFFF) {
+                    RoseChat.getInstance().getLogger().warning("Refusing to send an oversized BungeeCord plugin message (" + payload.length + " bytes).");
+                    return;
+                }
 
-            Player player = Iterables.getFirst(Bukkit.getOnlinePlayers(), null);
-            if (player != null)
-                player.sendPluginMessage(RoseChat.getInstance(), "BungeeCord", outputStream.toByteArray());
+                out.writeShort(payload.length);
+                out.write(payload);
+            }
         } catch (IOException e) {
             e.printStackTrace();
+            return;
+        }
+
+        byte[] payload = outputStream.toByteArray();
+        Runnable dispatch = () -> {
+            Player player = Iterables.getFirst(Bukkit.getOnlinePlayers(), null);
+            if (player != null)
+                player.sendPluginMessage(RoseChat.getInstance(), "BungeeCord", payload);
+        };
+
+        if (Bukkit.isPrimaryThread()) {
+            dispatch.run();
+        } else {
+            Bukkit.getScheduler().runTask(this.rosePlugin, dispatch);
         }
     }
 
@@ -103,7 +132,7 @@ public class BungeeManager extends Manager {
     //
 
     private String getPlayerPermissions(RosePlayer sender) {
-        if ((sender.isPlayer() && sender.asPlayer().isOp()))
+        if (sender.isConsole() || (sender.isPlayer() && sender.asPlayer().isOp()))
             return "*";
 
         StringBuilder stringBuilder = new StringBuilder();
@@ -145,6 +174,7 @@ public class BungeeManager extends Manager {
             out.writeUTF(PlaceholderAPIHook.applyPlaceholders(sender.isPlayer() ? sender.asPlayer() : null, message));
         } catch (IOException e) {
             e.printStackTrace();
+            return;
         }
 
         this.send("Forward", server, "rosechat:channel_message", outputStream, out);
@@ -152,24 +182,18 @@ public class BungeeManager extends Manager {
 
     /**
      * Called when the server receives a "channel_message" message.
-     * @param senderStr The name of the sender.
-     * @param senderUUID The {@link UUID} of the sender.
-     * @param senderGroup The permission group of the sender.
-     * @param permissions A list of RoseChat permissions that the sender has.
-     * @param messageId The {@link UUID} of the message.
-     * @param message The unformatted message received.
      */
     public void receiveChannelMessage(String channelStr, String senderStr, UUID senderUUID, String senderGroup, List<String> permissions,
                                       UUID messageId, boolean isJson, String message) {
         Channel channel = this.rosePlugin.getManager(ChannelManager.class).getChannel(channelStr);
-
         if (channel == null)
             return;
 
-        RosePlayer sender = new RosePlayer(senderUUID, senderStr, senderGroup);
+        RosePlayer sender = senderUUID == null
+                ? new RosePlayer(senderStr, senderGroup)
+                : new RosePlayer(senderUUID, senderStr, senderGroup);
         sender.setIgnoredPermissions(permissions);
 
-        // Must be done asynchronously for LuckPerms & Vault.
         RoseChat.MESSAGE_THREAD_POOL.execute(() -> {
             ChannelMessageOptions options = new ChannelMessageOptions.Builder()
                     .sender(sender)
@@ -185,58 +209,102 @@ public class BungeeManager extends Manager {
     // Direct Messages
     //
 
-    /**
-     * Sends a BungeeCord message to a specific player.
-     * @param sender The {@link RosePlayer} who sent the message.
-     * @param receiver The name of the player who received the message.
-     * @param json The formatted message to be sent.
-     * @param message The unformatted message to be sent.
-     * @param callback A callback to check if the message was received.
-     */
     public void sendDirectMessage(RosePlayer sender, String receiver, String json, String message, Consumer<Boolean> callback) {
+        this.sendDirectMessage(sender, receiver, UUID.randomUUID(), json, message, callback);
+    }
+
+    public void sendDirectMessage(RosePlayer sender, String receiver, UUID messageId, String json, String message, Consumer<Boolean> callback) {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(outputStream);
 
         try {
             out.writeUTF(sender.getRealName());
-            out.writeUTF(sender.getUUID().toString());
+            out.writeUTF(sender.getUUID() == null ? "null" : sender.getUUID().toString());
             out.writeUTF(sender.getPermissionGroup());
             out.writeUTF(this.getPlayerPermissions(sender));
             out.writeUTF(json == null ? "" : json);
             out.writeUTF(PlaceholderAPIHook.applyPlaceholders(sender.isPlayer() ? sender.asPlayer() : null, message));
+            // Append the message ID so older receivers can still parse the fields they know while
+            // newer receivers can correlate recipient-side delivery acknowledgement.
+            out.writeUTF(messageId.toString());
         } catch (IOException e) {
             e.printStackTrace();
+            this.completeBooleanCallback(callback, false);
+            return;
         }
 
-        this.sendPluginCheck(sender.getRealName(), receiver, "RoseChat", (hasPlugin) -> {
-           if (hasPlugin)
-               this.send("ForwardToPlayer", receiver, "rosechat:direct_message", outputStream, out);
+        this.sendPluginCheckWithProtocol(sender.getRealName(), receiver, "RoseChat", result -> {
+            // An older receiver cannot acknowledge actual recipient delivery. Do not report a
+            // message as delivered merely because that server has RoseChat installed.
+            if (!result.hasPlugin() || result.legacy()) {
+                this.completeBooleanCallback(callback, false);
+                return;
+            }
 
-           callback.accept(hasPlugin);
+            this.directMessageCallbacks.put(messageId, callback);
+            this.send("ForwardToPlayer", receiver, "rosechat:direct_message", outputStream, out);
+
+            long timeoutMillis = Math.max(1L, Settings.BUNGEECORD_MESSAGE_TIMEOUT.get());
+            long timeoutTicks = Math.max(1L, (timeoutMillis + 49L) / 50L);
+            Bukkit.getScheduler().runTaskLater(this.rosePlugin, () -> {
+                Consumer<Boolean> pending = this.directMessageCallbacks.remove(messageId);
+                if (pending != null)
+                    this.completeBooleanCallback(pending, false);
+            }, timeoutTicks);
         });
     }
 
-    /**
-     * Called when a player receives a "direct_message" message.
-     * @param player The {@link Player} who received the message.
-     * @param senderStr The name of the player who sent the message.
-     * @param senderUUID The {@link UUID} of the player who sent the message.
-     * @param group The permission group of the player who sent the message.
-     * @param permissions A list of RoseChat permissions that the sender has.
-     * @param json The formatted message being received.
-     * @param message The unformatted message being received.
-     */
-    public void receiveDirectMessage(Player player, String senderStr, UUID senderUUID, String group, List<String> permissions, String json, String message) {
-        PlayerData playerData = this.rosePlugin.getManager(PlayerDataManager.class).getPlayerData(player.getUniqueId());
-        if (playerData.getIgnoringPlayers().contains(senderUUID))
-            return;
-
-        RosePlayer sender = new RosePlayer(senderStr, group);
+    public void receiveDirectMessage(Player player, String senderStr, UUID senderUUID, String group, List<String> permissions,
+                                     UUID messageId, String json, String message) {
+        RosePlayer sender = senderUUID == null
+                ? new RosePlayer(senderStr, group)
+                : new RosePlayer(senderUUID, senderStr, group);
         sender.setIgnoredPermissions(permissions);
+
+        Consumer<Boolean> completion = success -> {
+            if (messageId != null)
+                this.sendDirectMessageResult(senderStr, messageId, success);
+        };
+
+        PlayerData playerData = this.rosePlugin.getManager(PlayerDataManager.class).getPlayerData(player.getUniqueId());
+        if (playerData == null) {
+            completion.accept(false);
+            return;
+        }
+
+        boolean canBypassToggle = senderUUID == null || permissions.stream()
+                .anyMatch(permission -> permission.equals("*") || permission.equalsIgnoreCase("togglemessage.bypass"));
+        if ((!canBypassToggle && !playerData.canBeMessaged())
+                || (senderUUID != null && playerData.getIgnoringPlayers().contains(senderUUID))) {
+            completion.accept(false);
+            return;
+        }
+
         if (json == null || json.isEmpty())
-            MessageUtils.sendPrivateMessage(sender, player.getName(), message);
+            MessageUtils.sendPrivateMessage(sender, player.getName(), message, messageId, completion);
         else
-            MessageUtils.sendPrivateJsonMessage(sender, player.getName(), json, message);
+            MessageUtils.sendPrivateJsonMessage(sender, player.getName(), json, message, messageId, completion);
+    }
+
+    public void sendDirectMessageResult(String receiver, UUID messageId, boolean success) {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(outputStream);
+
+        try {
+            out.writeUTF(messageId.toString());
+            out.writeBoolean(success);
+        } catch (IOException e) {
+            e.printStackTrace();
+            return;
+        }
+
+        this.send("ForwardToPlayer", receiver, "rosechat:direct_message_result", outputStream, out);
+    }
+
+    public void receiveDirectMessageResult(UUID messageId, boolean success) {
+        Consumer<Boolean> callback = this.directMessageCallbacks.remove(messageId);
+        if (callback != null)
+            this.completeBooleanCallback(callback, success);
     }
 
     //
@@ -244,87 +312,137 @@ public class BungeeManager extends Manager {
     //
 
     /**
-     * Checks if a plugin is on a player's server.
-     * @param sender The name of the player receiving the message.
-     * @param receiver The name of the player sending the message.
-     * @param plugin The name of the plugin to check for.
-     * @param callback True if the plugin exists on the server.
+     * Checks if a plugin is on a player's server. Legacy responses do not carry a request ID, so
+     * checks from the same sender are serialized. UUID-correlated checks from different senders
+     * remain independent and cannot consume each other's confirmations.
      */
     public void sendPluginCheck(String sender, String receiver, String plugin, Consumer<Boolean> callback) {
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-        DataOutputStream out = new DataOutputStream(outputStream);
+        this.sendPluginCheckWithProtocol(sender, receiver, plugin,
+                result -> this.completeBooleanCallback(callback, result.hasPlugin()));
+    }
 
-        try {
-            out.writeUTF(sender);
-            out.writeUTF(plugin);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        this.send("ForwardToPlayer", receiver, "rosechat:check_plugin", outputStream, out);
+    private void sendPluginCheckWithProtocol(String sender, String receiver, String plugin, Consumer<PluginCheckResult> callback) {
+        String senderKey = sender.toLowerCase(Locale.ROOT);
+        Object lock = this.pluginCheckLocks.computeIfAbsent(senderKey, ignored -> new Object());
 
         Bukkit.getScheduler().runTaskAsynchronously(this.rosePlugin, () -> {
-            int timeout = Settings.BUNGEECORD_MESSAGE_TIMEOUT.get();
-            long startTime = System.currentTimeMillis();
-            while (startTime + timeout > System.currentTimeMillis()) {
-                if (this.checkPluginPlayers.contains(sender)) {
-                    this.checkPluginPlayers.remove(sender);
-                    callback.accept(true);
+            synchronized (lock) {
+                UUID requestId = UUID.randomUUID();
+                this.legacyCheckPluginResponses.remove(senderKey);
+
+                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                DataOutputStream out = new DataOutputStream(outputStream);
+
+                try {
+                    out.writeUTF(sender);
+                    out.writeUTF(plugin);
+                    out.writeUTF(requestId.toString());
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    this.completePluginCheck(callback, new PluginCheckResult(false, false));
                     return;
                 }
-            }
 
-            callback.accept(false);
+                this.send("ForwardToPlayer", receiver, "rosechat:check_plugin", outputStream, out);
+
+                int timeout = Settings.BUNGEECORD_MESSAGE_TIMEOUT.get();
+                long deadline = System.currentTimeMillis() + timeout;
+                try {
+                    while (System.currentTimeMillis() < deadline) {
+                        Boolean response = this.checkPluginResponses.remove(requestId);
+                        if (response != null) {
+                            this.completePluginCheck(callback, new PluginCheckResult(response, false));
+                            return;
+                        }
+
+                        // Compatibility with a remote RoseChat build that predates request IDs.
+                        Boolean legacyResponse = this.legacyCheckPluginResponses.remove(senderKey);
+                        if (legacyResponse != null) {
+                            this.completePluginCheck(callback, new PluginCheckResult(legacyResponse, true));
+                            return;
+                        }
+
+                        long remaining = deadline - System.currentTimeMillis();
+                        if (remaining <= 0)
+                            break;
+
+                        try {
+                            Thread.sleep(Math.min(10L, remaining));
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            this.completePluginCheck(callback, new PluginCheckResult(false, false));
+                            return;
+                        }
+                    }
+
+                    this.completePluginCheck(callback, new PluginCheckResult(false, false));
+                } finally {
+                    this.checkPluginResponses.remove(requestId);
+                    this.legacyCheckPluginResponses.remove(senderKey);
+                }
+            }
         });
     }
 
-    /**
-     * Called when the server receives a "check_plugin" message.
-     * @param sender The name of the player who sent the original message.
-     * @param plugin The name of the plugin that is being checked.
-     */
-    public void receivePluginCheck(String sender, String plugin) {
-        this.sendPluginCheckConfirmation(sender, Bukkit.getServer().getPluginManager().getPlugin(plugin) != null);
+    public void receivePluginCheck(String sender, String plugin, UUID requestId) {
+        this.sendPluginCheckConfirmation(sender,
+                Bukkit.getServer().getPluginManager().getPlugin(plugin) != null,
+                requestId);
     }
 
-    /**
-     * Sends a message to confirm that the plugin is or is not installed.
-     * @param sender The name of the player who sent the original message.
-     * @param hasPlugin True if the server has the plugin.
-     */
-    public void sendPluginCheckConfirmation(String sender, boolean hasPlugin) {
+    public void sendPluginCheckConfirmation(String sender, boolean hasPlugin, UUID requestId) {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(outputStream);
 
         try {
             out.writeBoolean(hasPlugin);
             out.writeUTF(sender);
+            if (requestId != null)
+                out.writeUTF(requestId.toString());
         } catch (IOException e) {
             e.printStackTrace();
+            return;
         }
 
         this.send("ForwardToPlayer", sender, "rosechat:confirm_plugin", outputStream, out);
     }
 
-    /**
-     * Called when the server receives a "confirm_plugin" message.
-     * @param player The name of the player who sent the original message.
-     * @param hasPlugin True if the server has the plugin.
-     */
-    public void receivePluginCheckConfirmation(String player, boolean hasPlugin) {
-        if (hasPlugin)
-            this.checkPluginPlayers.add(player);
+    public void receivePluginCheckConfirmation(String player, boolean hasPlugin, UUID requestId) {
+        if (requestId != null) {
+            this.checkPluginResponses.put(requestId, hasPlugin);
+        } else {
+            this.legacyCheckPluginResponses.put(player.toLowerCase(Locale.ROOT), hasPlugin);
+        }
+    }
+
+    private void completePluginCheck(Consumer<PluginCheckResult> callback, PluginCheckResult result) {
+        Runnable completion = () -> callback.accept(result);
+        if (Bukkit.isPrimaryThread()) {
+            completion.run();
+        } else {
+            Bukkit.getScheduler().runTask(this.rosePlugin, completion);
+        }
+    }
+
+    private void completeBooleanCallback(Consumer<Boolean> callback, boolean result) {
+        if (callback == null)
+            return;
+
+        Runnable completion = () -> callback.accept(result);
+        if (Bukkit.isPrimaryThread()) {
+            completion.run();
+        } else {
+            Bukkit.getScheduler().runTask(this.rosePlugin, completion);
+        }
+    }
+
+    private record PluginCheckResult(boolean hasPlugin, boolean legacy) {
     }
 
     //
     // Message Replies
     //
 
-    /**
-     * Updates the player who should be replied to.
-     * @param sender The name of the player that sent the message.
-     * @param receiver The name of the player that received the message.
-     */
     public void sendUpdateReply(String sender, String receiver) {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(outputStream);
@@ -333,16 +451,12 @@ public class BungeeManager extends Manager {
             out.writeUTF(sender);
         } catch (IOException e) {
             e.printStackTrace();
+            return;
         }
 
         this.send("ForwardToPlayer", receiver, "rosechat:update_reply", outputStream, out);
     }
 
-    /**
-     * Called when the server receives the "update_reply" message.
-     * @param player The player who should receive the message.
-     * @param sender The name of the player who sent the message.
-     */
     public void receiveUpdateReply(Player player, String sender) {
         PlayerData data = this.rosePlugin.getManager(PlayerDataManager.class).getPlayerData(player.getUniqueId());
         if (data != null) {
@@ -355,11 +469,6 @@ public class BungeeManager extends Manager {
     // Message Deletion
     //
 
-    /**
-     * Sends a message to delete a message.
-     * @param server The server to delete the message on.
-     * @param messageId The {@link UUID} of the message to delete.
-     */
     public void sendMessageDeletion(String server, UUID messageId) {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(outputStream);
@@ -368,20 +477,15 @@ public class BungeeManager extends Manager {
             out.writeUTF(messageId.toString());
         } catch (IOException e) {
             e.printStackTrace();
+            return;
         }
 
         this.send("Forward", server, "rosechat:delete_message", outputStream, out);
     }
 
-
-    /**
-     * Called when the server receives a "delete_message" message.
-     * @param messageId The id of the message to delete.
-     */
     public void receiveMessageDeletion(UUID messageId) {
-        for (Player player : Bukkit.getOnlinePlayers()) {
+        for (Player player : Bukkit.getOnlinePlayers())
             RoseChatAPI.getInstance().deleteMessage(new RosePlayer(player), messageId);
-        }
     }
 
     public Collection<String> getAllPlayers() {

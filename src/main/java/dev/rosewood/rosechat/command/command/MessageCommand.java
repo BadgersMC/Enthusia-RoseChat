@@ -1,6 +1,5 @@
 package dev.rosewood.rosechat.command.command;
 
-import dev.rosewood.rosechat.RoseChat;
 import dev.rosewood.rosechat.chat.PlayerData;
 import dev.rosewood.rosechat.command.RoseChatCommand;
 import dev.rosewood.rosechat.command.argument.OfflinePlayerArgumentHandler;
@@ -13,8 +12,8 @@ import dev.rosewood.rosegarden.command.framework.ArgumentsDefinition;
 import dev.rosewood.rosegarden.command.framework.CommandContext;
 import dev.rosewood.rosegarden.command.framework.CommandInfo;
 import dev.rosewood.rosegarden.command.framework.annotation.RoseExecutable;
-import org.bukkit.Bukkit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import dev.rosewood.rosegarden.utils.StringPlaceholders;
+import org.bukkit.entity.Player;
 
 public class MessageCommand extends RoseChatCommand {
 
@@ -50,54 +49,57 @@ public class MessageCommand extends RoseChatCommand {
 
     @RoseExecutable
     public void execute(CommandContext context, String targetName, String message) {
-        Bukkit.getScheduler().runTaskAsynchronously(RoseChat.getInstance(), () -> {
-            RosePlayer player = new RosePlayer(context.getSender());
-            RosePlayer target = this.findPlayer(targetName);
-            RosePlayer messagePlayer = new RosePlayer(
-                    target == null ? targetName : target.getRealName(),
-                    target == null ? "default" : target.getPermissionGroup()
-            );
+        RosePlayer player = new RosePlayer(context.getSender());
+        Player target = MessageUtils.getPlayerExact(targetName);
+        RosePlayer messagePlayer = target == null
+                ? new RosePlayer(targetName, "default")
+                : new RosePlayer(target);
 
-            if (MessageUtils.isMessageEmpty(message)) {
-                player.sendLocaleMessage("message-blank");
+        if (MessageUtils.isMessageEmpty(message)) {
+            player.sendLocaleMessage("message-blank");
+            return;
+        }
+
+        // Cross-server delivery acknowledgements currently route back through ForwardToPlayer.
+        // Non-player senders have no valid return player, so keep them on the local-message path.
+        if (!player.isPlayer()
+                && target == null
+                && this.getAPI().isBungee()
+                && this.getAPI().getBungeeManager().getAllPlayers().contains(messagePlayer.getRealName())) {
+            player.sendLocaleMessage("invalid-argument",
+                    StringPlaceholders.of("message",
+                            this.getAPI().getLocaleManager().getLocaleMessage("argument-handler-player")));
+            return;
+        }
+
+        // Capture the sender's data before asynchronous cross-server delivery completes. A player
+        // may disconnect before the acknowledgement arrives, at which point RosePlayer#isPlayer()
+        // becomes false even though the successfully delivered message should still update /r.
+        PlayerData senderData = player.isPlayer() ? player.getPlayerData() : null;
+
+        MessageUtils.sendPrivateMessage(player, messagePlayer.getRealName(), message, success -> {
+            if (!success)
+                return;
+
+            if (senderData != null) {
+                senderData.setReplyTo(messagePlayer.getRealName());
+                senderData.save();
+            }
+
+            if (target == null) {
+                if (this.getAPI().isBungee()
+                        && this.getAPI().getBungeeManager().getAllPlayers().contains(messagePlayer.getRealName())) {
+                    this.getAPI().getBungeeManager().sendUpdateReply(player.getRealName(), messagePlayer.getRealName());
+                }
                 return;
             }
 
-            AtomicBoolean canBeMessaged = new AtomicBoolean(true);
-            if (target != null && !player.hasPermission("rosechat.togglemessage.bypass")) {
-                this.getAPI().getPlayerData(target.getUUID(), data -> {
-                    if (data != null && !data.canBeMessaged()) {
-                        canBeMessaged.set(false);
-                    }
-                });
-            }
-
-            if (!canBeMessaged.get()) {
-                player.sendLocaleMessage("command-togglemessage-cannot-message");
-                return;
-            }
-
-            MessageUtils.sendPrivateMessage(player, messagePlayer.getRealName(), message);
-
-            if (player.isPlayer()) {
-                player.getPlayerData().setReplyTo(messagePlayer.getRealName());
-                player.getPlayerData().save();
-            }
-
-            if (this.getAPI().isBungee())
-                this.getAPI().getBungeeManager().sendUpdateReply(player.getRealName(), messagePlayer.getRealName());
-
-            if (!messagePlayer.isPlayer() && !messagePlayer.isConsole())
+            PlayerData targetData = this.getAPI().getPlayerData(target.getUniqueId());
+            if (targetData == null)
                 return;
 
-            if (target != null) {
-                PlayerData targetData = target.getPlayerData();
-                if (targetData == null)
-                    return;
-
-                targetData.setReplyTo(player.getRealName());
-                targetData.save();
-            }
+            targetData.setReplyTo(player.getRealName());
+            targetData.save();
         });
     }
 
