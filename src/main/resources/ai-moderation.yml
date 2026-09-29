@@ -2,6 +2,12 @@
 enabled: false
 shadow-mode: true
 model: omni-moderation-latest
+
+# Put the OpenAI API key here if you do not want to configure an environment variable.
+# Keep this file private and never commit a real key to GitHub.
+api-key: ''
+
+# Optional fallback. Used only when api-key above is blank.
 api-key-environment-variable: OPENAI_API_KEY
 maximum-chat-hold-ms: 300
 request-timeout-ms: 2000
