@@ -31,6 +31,7 @@ public record AiModerationConfig(
         String staffStatusPermission
 ) {
     private static final String RESOURCE = "ai-moderation.yml";
+    private static final String INVALID_CONFIG_ENVIRONMENT_VARIABLE = "__ROSECHAT_AI_CONFIG_INVALID__";
 
     public AiModerationConfig {
         Objects.requireNonNull(model, "model");
@@ -64,6 +65,19 @@ public record AiModerationConfig(
 
     public static AiModerationConfig load(JavaPlugin plugin) {
         Objects.requireNonNull(plugin, "plugin");
+        try {
+            return loadStrict(plugin);
+        } catch (RuntimeException exception) {
+            String detail = exception.getMessage() == null || exception.getMessage().isBlank()
+                    ? exception.getClass().getSimpleName()
+                    : exception.getMessage();
+            plugin.getLogger().warning("AI moderation configuration is invalid; chat will fail open and staff will be warned: "
+                    + detail);
+            return invalidConfigurationFallback();
+        }
+    }
+
+    private static AiModerationConfig loadStrict(JavaPlugin plugin) {
         File file = new File(plugin.getDataFolder(), RESOURCE);
         if (!file.exists()) {
             plugin.saveResource(RESOURCE, false);
@@ -100,6 +114,40 @@ public record AiModerationConfig(
                 thresholds,
                 boundedThreshold("self-harm-intent-alert", yaml.getDouble("policy.self-harm-intent-alert", 0.55)),
                 nonBlank(yaml.getString("staff-status-permission"), "rosechat.seeblocked")
+        );
+    }
+
+    private static AiModerationConfig invalidConfigurationFallback() {
+        Map<String, Double> thresholds = new LinkedHashMap<>();
+        thresholds.put("harassment", 0.92);
+        thresholds.put("harassment/threatening", 0.78);
+        thresholds.put("hate", 0.82);
+        thresholds.put("hate/threatening", 0.70);
+        thresholds.put("self-harm/instructions", 0.80);
+        thresholds.put("sexual/minors", 0.65);
+        thresholds.put("violence/graphic", 0.92);
+        thresholds.put("illicit/violent", 0.92);
+        return new AiModerationConfig(
+                true,
+                true,
+                "omni-moderation-latest",
+                INVALID_CONFIG_ENVIRONMENT_VARIABLE,
+                Duration.ZERO,
+                Duration.ofSeconds(2),
+                6,
+                3,
+                Duration.ofSeconds(45),
+                3500,
+                Duration.ofMillis(1500),
+                3,
+                Duration.ofSeconds(60),
+                2,
+                Duration.ofHours(1),
+                Duration.ofDays(30),
+                0.75,
+                thresholds,
+                0.55,
+                "rosechat.seeblocked"
         );
     }
 
