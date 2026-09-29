@@ -48,9 +48,48 @@ public final class OpenAiModerationClient {
 
     BatchResult parseResponse(HttpResponse<String> response) {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new ModerationRequestException("OpenAI moderation returned HTTP " + response.statusCode());
+            String detail = extractErrorDetail(response.body());
+            String message = "OpenAI moderation returned HTTP " + response.statusCode();
+            if (!detail.isBlank()) {
+                message += ": " + detail;
+            }
+            throw httpException(response.statusCode(), message);
         }
         return parseBody(response.body());
+    }
+
+    private ModerationRequestException httpException(int statusCode, String message) {
+        return switch (statusCode) {
+            case 401 -> new OpenAiAuthenticationException(message);
+            case 403 -> new OpenAiPermissionException(message);
+            case 429 -> new OpenAiRateLimitException(message);
+            default -> statusCode >= 500
+                    ? new OpenAiServerException(message)
+                    : new ModerationRequestException(message);
+        };
+    }
+
+    private String extractErrorDetail(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        try {
+            JsonObject root = gson.fromJson(body, JsonObject.class);
+            if (root != null && root.has("error") && root.get("error").isJsonObject()) {
+                JsonObject error = root.getAsJsonObject("error");
+                if (error.has("message") && !error.get("message").isJsonNull()) {
+                    return sanitizeErrorDetail(error.get("message").getAsString());
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Fall through to a sanitized/truncated raw response.
+        }
+        return sanitizeErrorDetail(body);
+    }
+
+    private static String sanitizeErrorDetail(String detail) {
+        String normalized = detail.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 300 ? normalized : normalized.substring(0, 300) + "...";
     }
 
     BatchResult parseBody(String body) {
@@ -98,13 +137,37 @@ public final class OpenAiModerationClient {
         }
     }
 
-    public static final class ModerationRequestException extends RuntimeException {
+    public static class ModerationRequestException extends RuntimeException {
         public ModerationRequestException(String message) {
             super(message);
         }
 
         public ModerationRequestException(String message, Throwable cause) {
             super(message, cause);
+        }
+    }
+
+    public static final class OpenAiAuthenticationException extends ModerationRequestException {
+        public OpenAiAuthenticationException(String message) {
+            super(message);
+        }
+    }
+
+    public static final class OpenAiPermissionException extends ModerationRequestException {
+        public OpenAiPermissionException(String message) {
+            super(message);
+        }
+    }
+
+    public static final class OpenAiRateLimitException extends ModerationRequestException {
+        public OpenAiRateLimitException(String message) {
+            super(message);
+        }
+    }
+
+    public static final class OpenAiServerException extends ModerationRequestException {
+        public OpenAiServerException(String message) {
+            super(message);
         }
     }
 }
