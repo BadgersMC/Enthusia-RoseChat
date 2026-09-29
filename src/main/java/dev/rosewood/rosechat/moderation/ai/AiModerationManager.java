@@ -11,6 +11,7 @@ import dev.rosewood.rosechat.chat.channel.Channel;
 import dev.rosewood.rosechat.chat.channel.ChannelMessageOptions;
 import dev.rosewood.rosechat.message.DeletableMessage;
 import dev.rosewood.rosechat.message.RosePlayer;
+import java.io.File;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Instant;
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.Bukkit;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -83,12 +85,12 @@ public final class AiModerationManager implements AutoCloseable, Listener {
             this.health.set(Health.disabled());
             return;
         }
-        String key = System.getenv(loaded.apiKeyEnvironmentVariable());
-        if (key == null || key.isBlank()) {
+        String key = resolveApiKey(loaded);
+        if (key.isBlank()) {
             this.client = null;
             this.health.set(new Health(Status.DOWN,
-                    "environment variable " + loaded.apiKeyEnvironmentVariable() + " is missing"));
-            plugin.getLogger().warning("AI moderation is enabled but its OpenAI API key environment variable is missing; chat will fail open.");
+                    "api-key is blank and environment variable " + loaded.apiKeyEnvironmentVariable() + " is missing"));
+            plugin.getLogger().warning("AI moderation is enabled but no OpenAI API key is configured in ai-moderation.yml or its fallback environment variable; chat will fail open.");
             return;
         }
         this.client = new OpenAiModerationClient(
@@ -441,6 +443,18 @@ public final class AiModerationManager implements AutoCloseable, Listener {
     @Override
     public void close() {
         scheduler.shutdownNow();
+    }
+
+    private String resolveApiKey(AiModerationConfig loaded) {
+        File file = new File(plugin.getDataFolder(), "ai-moderation.yml");
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        String configured = yaml.getString("api-key", "");
+        if (configured != null && !configured.isBlank()) {
+            return configured.trim();
+        }
+
+        String environment = System.getenv(loaded.apiKeyEnvironmentVariable());
+        return environment == null ? "" : environment.trim();
     }
 
     private static String safeName(RosePlayer player) {
