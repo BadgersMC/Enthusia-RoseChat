@@ -32,21 +32,10 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      - name: Verify fallback LumaGuilds compile contract
+      - name: Build and test RoseChat
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon clean compileJava
-
-      - name: Download deployed LumaGuilds API
-        run: |
-          curl --fail --location --retry 3 \
-            --output LumaGuilds-2.1.13.jar \
-            https://github.com/BadgersMC/LumaGuilds/releases/download/v2.1.13/LumaGuilds-2.1.13.jar
-
-      - name: Build and test RoseChat against LumaGuilds 2.1.13
-        env:
-          LUMAGUILDS_JAR: ${{ github.workspace }}/LumaGuilds-2.1.13.jar
-        run: ./gradlew --no-daemon clean test shadowJar
+          ./gradlew --no-daemon clean test shadowJar
 
       - name: Verify test execution
         shell: python
@@ -76,14 +65,10 @@ jobs:
             exit 1
           fi
 
-          for required_class in \
-            dev/rosewood/rosechat/hook/channel/lumaguilds/LumaGuildsChannel.class \
-            dev/rosewood/rosechat/hook/channel/lumaguilds/LumaGuildsChannelProvider.class; do
-            if ! grep -Fxq "$required_class" jar-entries.txt; then
-              echo "Missing required LumaGuilds integration class: $required_class" >&2
-              exit 1
-            fi
-          done
+          if grep -Eq '^dev/rosewood/rosechat/hook/channel/lumaguilds/' jar-entries.txt; then
+            echo "RoseChat must not package a LumaGuilds-owned channel provider" >&2
+            exit 1
+          fi
 
           if grep -Eq '^(net/enthusia/staff|org/bukkit|net/lumalyte/lg)/' jar-entries.txt; then
             echo "The provider jar contains a consumer or server API class" >&2
