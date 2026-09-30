@@ -5,6 +5,7 @@ import dev.rosewood.rosechat.RoseChat;
 import dev.rosewood.rosechat.command.RoseChatCommand;
 import dev.rosewood.rosechat.moderation.ai.AiModerationConfig;
 import dev.rosewood.rosechat.moderation.ai.AiModerationManager;
+import dev.rosewood.rosechat.moderation.ai.AiModerationMetrics;
 import dev.rosewood.rosechat.moderation.ai.AiModerationPolicy;
 import dev.rosewood.rosechat.moderation.ai.ModerationScores;
 import dev.rosewood.rosechat.moderation.ai.OpenAiModerationClient;
@@ -69,6 +70,20 @@ public class AiCommand extends RoseChatCommand {
             }
             sender.sendMessage("Health: " + status);
             sender.sendMessage("Detail: " + health.detail());
+
+            AiModerationMetrics.Snapshot metrics = manager.metrics();
+            sender.sendMessage("Requests: " + metrics.requests()
+                    + " | success=" + metrics.successes()
+                    + " | failed=" + metrics.failures()
+                    + " | locally limited=" + metrics.rateLimited());
+            sender.sendMessage("Decisions: allow=" + metrics.allows()
+                    + " | alert=" + metrics.alerts()
+                    + " | delete=" + metrics.deletes()
+                    + " (late=" + metrics.lateDeletes() + ")"
+                    + " | shadow flags=" + metrics.shadowFlags());
+            sender.sendMessage("Latency: p50=" + metrics.p50LatencyMs() + "ms"
+                    + " | p95=" + metrics.p95LatencyMs() + "ms"
+                    + " | p99=" + metrics.p99LatencyMs() + "ms");
         }
 
         sender.sendMessage("Max chat hold: " + config.maximumChatHold().toMillis() + "ms");
