@@ -52,7 +52,7 @@ jobs:
                   totals[key] += int(suite.attrib.get(key, 0))
           print(totals)
           if not reports or totals['tests'] < 10 or any(totals[key] for key in ('skipped', 'failures', 'errors')):
-              sys.exit('Expected all ten staff bridge tests to execute and pass')
+              sys.exit('Expected at least ten tests to execute and pass')
 
       - name: Verify provider packaging
         shell: bash
@@ -60,8 +60,8 @@ jobs:
           jar_path=$(find build/libs -maxdepth 1 -type f -name 'RoseChat-*.jar' | head -n 1)
           jar tf "$jar_path" > jar-entries.txt
           api_count=$(grep -c '^dev/rosewood/rosechat/api/staff/.*\.class$' jar-entries.txt)
-          if [[ "$api_count" -ne 19 ]]; then
-            echo "Expected 19 staff API class entries, found $api_count" >&2
+          if [[ "$api_count" -ne 20 ]]; then
+            echo "Expected 20 staff API class entries, found $api_count" >&2
             exit 1
           fi
 
