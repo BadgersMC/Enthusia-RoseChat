@@ -2,6 +2,11 @@
 enabled: false
 shadow-mode: true
 
+# Message blocking/deletion and punishment escalation are separate rollout controls.
+# Set shadow-mode: false to enforce message decisions while keeping punishments disabled.
+punishments:
+  enabled: false
+
 # Pin the snapshot so tuned policy thresholds do not silently drift when the latest alias changes.
 model: omni-moderation-2024-09-26
 
@@ -25,8 +30,8 @@ circuit-breaker:
   failures-to-open: 3
   open-seconds: 60
 
-# Two AI-enforced violations in the rolling hour remain the automatic mute threshold.
-# Every strike now persists the exact message and accompanies the Staff punishment request.
+# These values stay locked to the EnthusiaStaff automatic-mute contract for when punishments are enabled.
+# While punishments.enabled is false, DELETE decisions still block/remove messages but do not record strikes or request mutes.
 strikes:
   required: 2
   window-minutes: 60
