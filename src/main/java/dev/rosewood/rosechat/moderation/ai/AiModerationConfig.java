@@ -35,7 +35,7 @@ public record AiModerationConfig(
     static final Duration REQUIRED_AUTOMATIC_MUTE_WINDOW = Duration.ofHours(1);
     static final Duration REQUIRED_AUTOMATIC_MUTE_DURATION = Duration.ofDays(30);
     private static final String RESOURCE = "ai-moderation.yml";
-    private static final String DEFAULT_MODEL = "omni-moderation-2024-09-26";
+    private static final String DEFAULT_MODEL = "omni-moderation-latest";
     private static final String INVALID_CONFIG_ENVIRONMENT_VARIABLE = "__ROSECHAT_AI_CONFIG_INVALID__";
 
     public AiModerationConfig {

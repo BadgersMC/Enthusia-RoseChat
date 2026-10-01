@@ -7,8 +7,9 @@ shadow-mode: true
 punishments:
   enabled: false
 
-# Pin the snapshot so tuned policy thresholds do not silently drift when the latest alias changes.
-model: omni-moderation-2024-09-26
+# Use the currently supported moderation alias. We observed HTTP 403 for the pinned
+# omni-moderation-2024-09-26 snapshot while this alias succeeds for the same project/key.
+model: omni-moderation-latest
 
 # Put the OpenAI API key here if you do not want to configure an environment variable.
 # Keep this file private and never commit a real key to GitHub.
