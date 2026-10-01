@@ -11,6 +11,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 public record AiModerationConfig(
         boolean enabled,
         boolean shadowMode,
+        boolean punishmentsEnabled,
         String model,
         String apiKeyEnvironmentVariable,
         Duration maximumChatHold,
@@ -109,6 +110,7 @@ public record AiModerationConfig(
         return new AiModerationConfig(
                 yaml.getBoolean("enabled", false),
                 yaml.getBoolean("shadow-mode", true),
+                yaml.getBoolean("punishments.enabled", false),
                 nonBlank(yaml.getString("model"), DEFAULT_MODEL),
                 nonBlank(yaml.getString("api-key-environment-variable"), "OPENAI_API_KEY"),
                 Duration.ofMillis(yaml.getLong("maximum-chat-hold-ms", 200)),
@@ -143,6 +145,7 @@ public record AiModerationConfig(
         return new AiModerationConfig(
                 true,
                 true,
+                false,
                 DEFAULT_MODEL,
                 INVALID_CONFIG_ENVIRONMENT_VARIABLE,
                 Duration.ZERO,
