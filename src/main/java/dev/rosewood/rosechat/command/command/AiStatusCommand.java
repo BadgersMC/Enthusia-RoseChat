@@ -26,5 +26,4 @@ public class AiStatusCommand extends RoseChatCommand {
     public void execute(CommandContext context) {
         AiCommand.sendStatus((RoseChat) this.rosePlugin, context.getSender());
     }
-
 }
