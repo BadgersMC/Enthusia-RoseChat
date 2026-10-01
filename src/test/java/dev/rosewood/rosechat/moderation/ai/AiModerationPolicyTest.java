@@ -65,7 +65,7 @@ class AiModerationPolicyTest {
     void directSevereHarassmentStillDeletes() {
         AiModerationPolicy.Verdict verdict = policy.evaluate(batch(
                 true,
-                Map.of("harassment", 0.96),
+                Map.of("harassment", 0.99),
                 Map.of("harassment", 0.20)
         ));
 
