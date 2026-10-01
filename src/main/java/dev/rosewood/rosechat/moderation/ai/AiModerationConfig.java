@@ -37,6 +37,7 @@ public record AiModerationConfig(
     private static final String RESOURCE = "ai-moderation.yml";
     private static final String DEFAULT_MODEL = "omni-moderation-latest";
     private static final String DEFAULT_STAFF_STATUS_PERMISSION = "rosechat.ai.alerts";
+    private static final String LEGACY_STAFF_STATUS_PERMISSION = "rosechat.seeblocked";
     private static final String INVALID_CONFIG_ENVIRONMENT_VARIABLE = "__ROSECHAT_AI_CONFIG_INVALID__";
 
     public AiModerationConfig {
@@ -129,7 +130,7 @@ public record AiModerationConfig(
                 boundedThreshold("corroboration-floor-ratio", yaml.getDouble("policy.corroboration-floor-ratio", 0.75)),
                 thresholds,
                 boundedThreshold("self-harm-intent-alert", yaml.getDouble("policy.self-harm-intent-alert", 0.55)),
-                nonBlank(yaml.getString("staff-status-permission"), DEFAULT_STAFF_STATUS_PERMISSION)
+                staffPermission(yaml.getString("staff-status-permission"))
         );
     }
 
@@ -173,6 +174,14 @@ public record AiModerationConfig(
             throw new IllegalArgumentException("AI moderation threshold " + key + " must be in (0, 1]");
         }
         return value;
+    }
+
+    private static String staffPermission(String value) {
+        String permission = nonBlank(value, DEFAULT_STAFF_STATUS_PERMISSION);
+        if (LEGACY_STAFF_STATUS_PERMISSION.equalsIgnoreCase(permission)) {
+            return DEFAULT_STAFF_STATUS_PERMISSION;
+        }
+        return permission;
     }
 
     private static String nonBlank(String value, String fallback) {
