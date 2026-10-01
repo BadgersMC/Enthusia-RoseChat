@@ -1,6 +1,14 @@
 # Optional OpenAI chat moderation. Chat always fails open if this subsystem is unavailable.
 enabled: false
 shadow-mode: true
+
+# Message blocking/deletion and punishment escalation are separate rollout controls.
+# Set shadow-mode: false to enforce message decisions while keeping punishments disabled.
+punishments:
+  enabled: false
+
+# Use the currently supported moderation alias. We observed HTTP 403 for the pinned
+# omni-moderation-2024-09-26 snapshot while this alias succeeds for the same project/key.
 model: omni-moderation-latest
 
 # Put the OpenAI API key here if you do not want to configure an environment variable.
@@ -9,7 +17,7 @@ api-key: ''
 
 # Optional fallback. Used only when api-key above is blank.
 api-key-environment-variable: OPENAI_API_KEY
-maximum-chat-hold-ms: 300
+maximum-chat-hold-ms: 200
 request-timeout-ms: 2000
 
 context:
@@ -23,6 +31,8 @@ circuit-breaker:
   failures-to-open: 3
   open-seconds: 60
 
+# These values stay locked to the EnthusiaStaff automatic-mute contract for when punishments are enabled.
+# While punishments.enabled is false, DELETE decisions still block/remove messages but do not record strikes or request mutes.
 strikes:
   required: 2
   window-minutes: 60
