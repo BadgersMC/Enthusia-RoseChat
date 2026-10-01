@@ -406,7 +406,9 @@ public final class AiModerationManager implements AutoCloseable, Listener {
                 (followUp ? "FOLLOWUP_" : "") + (late ? "DELETE_LATE" : "DELETE_PRE_BROADCAST"), latencyMs);
         alertStaff("AI moderation " + (late ? "removed" : "blocked") + " a public message from "
                 + pending.senderName + ": " + verdict.category() + " (severity " + verdict.severity() + ").");
-        recordStrike(pending, verdict, current, activeStrikeStore);
+        if (current.punishmentsEnabled()) {
+            recordStrike(pending, verdict, current, activeStrikeStore);
+        }
     }
 
     private String enforcementNotice(String action, AiModerationPolicy.Verdict verdict) {
