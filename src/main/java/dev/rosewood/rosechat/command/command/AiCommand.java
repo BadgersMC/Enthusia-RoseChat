@@ -56,7 +56,8 @@ public class AiCommand extends RoseChatCommand {
 
         sender.sendMessage("--- RoseChat AI Moderation ---");
         sender.sendMessage("Enabled: " + config.enabled());
-        sender.sendMessage("Mode: " + (config.shadowMode() ? "SHADOW (no enforcement)" : "ENFORCING"));
+        sender.sendMessage("Mode: " + (config.shadowMode() ? "SHADOW (no message enforcement)" : "ENFORCING MESSAGES"));
+        sender.sendMessage("Punishments: " + (config.punishmentsEnabled() ? "ENABLED" : "DISABLED (no strikes/mutes)"));
         sender.sendMessage("Model: " + config.model());
         sender.sendMessage("API key: " + (key.key().isBlank() ? "MISSING" : "configured via " + key.source()));
 
@@ -89,6 +90,7 @@ public class AiCommand extends RoseChatCommand {
         sender.sendMessage("Max chat hold: " + config.maximumChatHold().toMillis() + "ms");
         sender.sendMessage("Use /rosechat ai test to verify OpenAI now.");
         sender.sendMessage("Use /rosechat ai inspect <message> to see scores without enforcing.");
+        sender.sendMessage("Inspect samples append to plugins/RoseChat/ai-moderation-calibration.jsonl.");
     }
 
     static CompletableFuture<ProbeResult> probe(RoseChat plugin, String message) {
