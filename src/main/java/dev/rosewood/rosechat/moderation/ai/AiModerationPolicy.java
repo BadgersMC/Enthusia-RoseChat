@@ -26,7 +26,7 @@ public final class AiModerationPolicy {
     }
 
     public Verdict evaluate(OpenAiModerationClient.BatchResult batch) {
-        return evaluate("", batch);
+        return evaluate(batch.targetMessage(), batch);
     }
 
     public Verdict evaluate(String message, OpenAiModerationClient.BatchResult batch) {
