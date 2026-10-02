@@ -124,9 +124,7 @@ public final class AiModerationPolicy {
         for (Map.Entry<String, Double> threshold : config.deleteThresholds().entrySet()) {
             String category = threshold.getKey();
 
-            // A follow-up cannot change plain-harassment enforcement because that category is
-            // target-only. Skipping it avoids a second API request for ordinary insults.
-            if (HARASSMENT.equals(category) || shouldIgnoreCategoryForMinecraft(normalized, category)) {
+            if (shouldIgnoreCategoryForMinecraft(normalized, category)) {
                 continue;
             }
 
