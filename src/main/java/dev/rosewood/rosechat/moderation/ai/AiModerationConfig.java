@@ -104,7 +104,7 @@ public record AiModerationConfig(
         thresholds.put("harassment/threatening", yaml.getDouble("policy.harassment-threatening", 0.78));
         thresholds.put("hate", yaml.getDouble("policy.hate", 0.82));
         thresholds.put("hate/threatening", yaml.getDouble("policy.hate-threatening", 0.70));
-        thresholds.put("self-harm/instructions", yaml.getDouble("policy.self-harm-instructions", 0.80));
+        thresholds.put("self-harm/instructions", yaml.getDouble("policy.self-harm-instructions", 0.75));
         thresholds.put("sexual/minors", yaml.getDouble("policy.sexual-minors", 0.65));
         thresholds.put("violence/graphic", yaml.getDouble("policy.violence-graphic", 0.92));
         thresholds.put("illicit/violent", yaml.getDouble("policy.illicit-violent", 0.92));
@@ -129,7 +129,7 @@ public record AiModerationConfig(
                 Duration.ofDays(yaml.getLong("strikes.mute-days", REQUIRED_AUTOMATIC_MUTE_DURATION.toDays())),
                 boundedThreshold("corroboration-floor-ratio", yaml.getDouble("policy.corroboration-floor-ratio", 0.75)),
                 thresholds,
-                boundedThreshold("self-harm-intent-alert", yaml.getDouble("policy.self-harm-intent-alert", 0.55)),
+                boundedThreshold("self-harm-intent-alert", yaml.getDouble("policy.self-harm-intent-alert", 0.85)),
                 staffPermission(yaml.getString("staff-status-permission"))
         );
     }
@@ -140,7 +140,7 @@ public record AiModerationConfig(
         thresholds.put("harassment/threatening", 0.78);
         thresholds.put("hate", 0.82);
         thresholds.put("hate/threatening", 0.70);
-        thresholds.put("self-harm/instructions", 0.80);
+        thresholds.put("self-harm/instructions", 0.75);
         thresholds.put("sexual/minors", 0.65);
         thresholds.put("violence/graphic", 0.92);
         thresholds.put("illicit/violent", 0.92);
@@ -164,7 +164,7 @@ public record AiModerationConfig(
                 REQUIRED_AUTOMATIC_MUTE_DURATION,
                 0.75,
                 thresholds,
-                0.55,
+                0.85,
                 DEFAULT_STAFF_STATUS_PERMISSION
         );
     }
