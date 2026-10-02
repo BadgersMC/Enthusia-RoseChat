@@ -6,6 +6,8 @@ import java.util.Objects;
 
 public final class AiModerationPolicy {
     private static final String SELF_HARM_INTENT = "self-harm/intent";
+    private static final String SELF_HARM_INSTRUCTIONS = "self-harm/instructions";
+    private static final String SEXUAL_MINORS = "sexual/minors";
     private static final String HARASSMENT = "harassment";
     private static final String HARASSMENT_THREATENING = "harassment/threatening";
     private static final String ILLICIT_VIOLENT = "illicit/violent";
@@ -32,6 +34,11 @@ public final class AiModerationPolicy {
     public Verdict evaluate(String message, OpenAiModerationClient.BatchResult batch) {
         Objects.requireNonNull(batch, "batch");
         String normalized = normalize(message);
+
+        Candidate modelFlag = highConfidenceModelFlag(batch.target());
+        if (modelFlag != null) {
+            return delete(modelFlag);
+        }
 
         Candidate realWorld = realWorldSafetyCandidate(normalized, batch.target());
         if (realWorld != null) {
@@ -64,6 +71,16 @@ public final class AiModerationPolicy {
                 0,
                 followUpUseful
         );
+    }
+
+    private Candidate highConfidenceModelFlag(ModerationScores target) {
+        for (String category : new String[] {SELF_HARM_INSTRUCTIONS, SEXUAL_MINORS}) {
+            if (Boolean.TRUE.equals(target.categories().get(category))) {
+                double score = target.score(category);
+                return new Candidate(category, score, score > 0.0D ? score : 1.0D);
+            }
+        }
+        return null;
     }
 
     private Candidate realWorldSafetyCandidate(String normalized, ModerationScores target) {
