@@ -38,7 +38,7 @@ final class AiModerationTestConfig {
                 Duration.ofDays(30),
                 0.75,
                 thresholds,
-                0.85,
+                0.55,
                 "rosechat.ai.alerts"
         );
     }
