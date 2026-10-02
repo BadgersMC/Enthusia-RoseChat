@@ -47,11 +47,14 @@ policy:
   harassment-threatening: 0.78
   hate: 0.82
   hate-threatening: 0.70
+  # Slightly lower so abusive shorthand such as KYS crosses the instruction threshold.
   self-harm-instructions: 0.75
   sexual-minors: 0.65
   violence-graphic: 0.92
   illicit-violent: 0.92
-  # Self-harm instructions use a slightly lower threshold so common abuse shorthand\n  # such as KYS is blocked. Intent alerts are higher to avoid Minecraft phrases\n  # such as 'kill me bro' while still surfacing strong first-person self-harm intent.\n  self-harm-intent-alert: 0.85
+  # Higher than the first rollout to avoid Minecraft phrases such as "kill me bro"
+  # while still surfacing strong first-person self-harm intent for staff review.
+  self-harm-intent-alert: 0.85
 
 # Dedicated permission for AI moderation staff notices. Do not grant this to normal players.
 staff-status-permission: rosechat.ai.alerts
