@@ -3,70 +3,88 @@ package dev.rosewood.rosechat.moderation.ai;
 import com.google.gson.Gson;
 import dev.rosewood.rosechat.RoseChat;
 import dev.rosewood.rosechat.api.RoseChatAPI;
-import dev.rosewood.rosechat.api.staff.AutomatedModerationEvidence;
-import dev.rosewood.rosechat.api.staff.AutomatedModerationResult;
-import dev.rosewood.rosechat.api.staff.AutomatedPublicMuteRequest;
 import dev.rosewood.rosechat.api.staff.ChannelClassification;
-import dev.rosewood.rosechat.api.staff.RoseChatAutomatedModerationService;
 import dev.rosewood.rosechat.chat.channel.Channel;
 import dev.rosewood.rosechat.chat.channel.ChannelMessageOptions;
 import dev.rosewood.rosechat.config.Settings;
 import dev.rosewood.rosechat.message.DeletableMessage;
 import dev.rosewood.rosechat.message.RosePlayer;
-import java.io.File;
+import dev.rosewood.rosechat.moderation.ai.central.CentralCredentials;
+import dev.rosewood.rosechat.moderation.ai.central.CentralModerationClient;
+import dev.rosewood.rosechat.moderation.ai.central.CentralModerationEngine;
+import dev.rosewood.rosechat.moderation.ai.central.ChannelProfile;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Clock;
-import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.Bukkit;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 
+/**
+ * Chat-moderation lifecycle for RoseChat.
+ *
+ * <p>The central Policy-v1 moderation service is the <strong>single</strong>
+ * semantic moderation authority. The legacy local OpenAI threshold policy
+ * ({@link AiModerationPolicy}), the direct OpenAI production path
+ * ({@link OpenAiModerationClient} as a decision source), and the local strike
+ * ledger escalation path are retired as production authorities: they are never
+ * consulted for production ALLOW/DELETE while central mode is active, and no
+ * automatic punishment is ever issued. EnthusiaStaff owns human review and all
+ * punishment/case authority.</p>
+ *
+ * <p>RoseChat enforces only the central {@code message_action} (ALLOW/BLOCK).
+ * Central {@code strike_recommendation} / {@code containment} values are
+ * surfaced to staff diagnostics and the audit log; they are never converted
+ * into mutes or bans by this plugin.</p>
+ *
+ * <p>Preserved safety properties: short bounded hold, async I/O (no
+ * main-thread network), fail-open on every failure, circuit breaker,
+ * generation fencing across reloads, exact-message late deletion, and staff
+ * health/status visibility.</p>
+ */
 public final class AiModerationManager implements AutoCloseable, Listener {
-    private static final int SAFE_GLOBAL_REQUESTS_PER_MINUTE = 450;
-    private static final int SAFE_PLAYER_REQUESTS_PER_TEN_SECONDS = 8;
-    private static final int MAX_IN_FLIGHT_REQUESTS = 64;
+    private static final int STAFF_ALERT_MESSAGE_LIMIT = 180;
+    private static final int MAX_DELIVERY_TARGETS = 1024;
+
+    private static final String COLOR_DARK_GRAY = "\u00A78";
+    private static final String COLOR_GRAY = "\u00A77";
+    private static final String COLOR_AQUA = "\u00A7b";
+    private static final String COLOR_DARK_AQUA = "\u00A73";
+    private static final String COLOR_GREEN = "\u00A7a";
+    private static final String COLOR_YELLOW = "\u00A7e";
+    private static final String COLOR_GOLD = "\u00A76";
+    private static final String COLOR_RED = "\u00A7c";
+    private static final String COLOR_BOLD = "\u00A7l";
+    private static final String COLOR_RESET = "\u00A7r";
 
     private final RoseChat plugin;
     private final Clock clock;
     private final ScheduledExecutorService scheduler;
+    private final ExecutorService networkExecutor;
     private final AtomicReference<Health> health = new AtomicReference<>(Health.disabled());
-    private final AtomicInteger consecutiveFailures = new AtomicInteger();
-    private final AtomicInteger inFlightRequests = new AtomicInteger();
-    private final Map<UUID, Instant> muteRequestedUntil = new ConcurrentHashMap<>();
-    private final Object requestWindowLock = new Object();
-    private final Deque<Instant> globalRequestWindow = new ArrayDeque<>();
-    private final Map<UUID, Deque<Instant>> playerRequestWindows = new HashMap<>();
     private final AiModerationMetrics metrics = new AiModerationMetrics();
-    private final AiModerationRuntimeFence runtimeFence = new AiModerationRuntimeFence();
-    private volatile Instant circuitOpenUntil = Instant.EPOCH;
+    private final Map<UUID, DeliveryTarget> deliveryTargets = new ConcurrentHashMap<>();
+    private final EngineActions engineActions = new EngineActions();
     private volatile AiModerationConfig config;
-    private volatile AiModerationContextBuffer context;
-    private volatile AiModerationPolicy policy;
-    private volatile AiModerationStrikeStore strikeStore;
     private volatile AiModerationAuditStore auditStore;
-    private volatile OpenAiModerationClient client;
+    private volatile CentralModerationEngine engine;
+    private volatile CentralModerationClient centralClient;
 
     public AiModerationManager(RoseChat plugin) {
         this(plugin, Clock.systemUTC());
@@ -81,63 +99,102 @@ public final class AiModerationManager implements AutoCloseable, Listener {
             return thread;
         };
         this.scheduler = Executors.newScheduledThreadPool(2, factory);
+        ThreadFactory networkFactory = runnable -> {
+            Thread thread = new Thread(runnable, "RoseChat-Central-Moderation-Net");
+            thread.setDaemon(true);
+            return thread;
+        };
+        this.networkExecutor = Executors.newSingleThreadExecutor(networkFactory);
         reload();
     }
 
     public synchronized void reload() {
-        runtimeFence.advance();
+        CentralModerationEngine previous = this.engine;
+        if (previous != null) {
+            previous.retire();
+        }
+        this.engine = null;
+        this.centralClient = null;
+        deliveryTargets.clear();
+
         AiModerationConfig loaded = AiModerationConfig.load(plugin);
         this.config = loaded;
-        this.context = new AiModerationContextBuffer(clock, loaded);
-        this.policy = new AiModerationPolicy(loaded);
-        this.strikeStore = new AiModerationStrikeStore(
-                plugin.getDataFolder().toPath().resolve("ai-moderation-strikes.tsv"),
-                clock,
-                loaded.strikeWindow(),
-                plugin.getLogger()
-        );
         this.auditStore = new AiModerationAuditStore(
                 plugin.getDataFolder().toPath().resolve("ai-moderation-audit"),
                 clock,
                 plugin.getLogger()
         );
-        this.consecutiveFailures.set(0);
-        this.circuitOpenUntil = Instant.EPOCH;
-        synchronized (requestWindowLock) {
-            globalRequestWindow.clear();
-            playerRequestWindows.clear();
-        }
+
         if (!loaded.enabled()) {
-            this.client = null;
             this.health.set(Health.disabled());
             return;
         }
-        String key = resolveApiKey(loaded);
-        if (key.isBlank()) {
-            this.client = null;
+        if (!loaded.centralMode()) {
             this.health.set(new Health(Status.DOWN,
-                    "api-key is blank and environment variable " + loaded.apiKeyEnvironmentVariable() + " is missing"));
-            plugin.getLogger().warning("AI moderation is enabled but no OpenAI API key is configured in ai-moderation.yml or its fallback environment variable; chat will fail open.");
+                    "central moderation is not configured (central.enabled=false or central.base-uri is blank); "
+                            + "no semantic moderation is active and chat fails open"));
+            plugin.getLogger().warning(
+                    "AI moderation is enabled but the central service is not configured; chat will fail open "
+                            + "with no semantic moderation. Set central.base-uri plus credentials.");
             return;
         }
-        this.client = new OpenAiModerationClient(
-                HttpClient.newBuilder().connectTimeout(loaded.requestTimeout()).build(),
+        CentralCredentials credentials = CentralCredentials.resolve(loaded);
+        if (!credentials.complete()) {
+            this.health.set(new Health(Status.DOWN,
+                    "central moderation credentials incomplete (" + credentials.safeSummary() + "); chat fails open"));
+            plugin.getLogger().warning("Central AI moderation is enabled but credentials are incomplete ("
+                    + credentials.safeSummary() + "); chat will fail open.");
+            return;
+        }
+        if (loaded.punishmentsEnabled()) {
+            plugin.getLogger().warning("ai-moderation.yml sets legacy punishments.enabled=true, which has no effect: "
+                    + "central mode never records AI strikes or requests automatic punishments. "
+                    + "EnthusiaStaff owns all punishment authority.");
+        }
+
+        URI baseUri = URI.create(loaded.centralBaseUri().trim());
+        this.centralClient = new CentralModerationClient(
+                HttpClient.newBuilder().connectTimeout(loaded.centralRequestTimeout()).build(),
                 new Gson(),
-                loaded,
-                key
+                baseUri,
+                credentials.clientId(),
+                () -> CentralCredentials.resolve(loaded).token(),
+                loaded.centralRequestTimeout()
         );
-        this.health.set(new Health(Status.HEALTHY, "configured"));
+        CentralModerationEngine.EngineParams engineParams = new CentralModerationEngine.EngineParams(
+                loaded.maximumChatHold(),
+                loaded.centralRequestTimeout(),
+                loaded.failuresToOpen(),
+                loaded.circuitOpenDuration(),
+                64,
+                450,
+                8,
+                25,
+                32,
+                250L,
+                8
+        );
+        this.engine = new CentralModerationEngine(
+                centralClient::moderate,
+                engineActions,
+                engineParams,
+                metrics,
+                clock,
+                scheduler,
+                networkExecutor
+        );
+        this.health.set(new Health(Status.HEALTHY,
+                "central moderation active (" + credentials.safeSummary() + ")"));
     }
 
     public void moderateAndSend(Channel channel, ChannelMessageOptions options) {
-        RuntimeSnapshot runtime = runtimeSnapshot();
-        AiModerationConfig current = runtime.config();
+        AiModerationConfig current = this.config;
         if (!eligible(channel, options, current)) {
             channel.send(options);
             return;
         }
-        OpenAiModerationClient activeClient = runtime.client();
-        if (activeClient == null || circuitOpen()) {
+        CentralModerationEngine activeEngine = this.engine;
+        if (activeEngine == null) {
             channel.send(options);
             return;
         }
@@ -145,72 +202,84 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         UUID eventId = UUID.randomUUID();
         UUID senderId = options.sender().getUUID();
         String senderName = safeName(options.sender());
-        if (!reserveRequest(senderId)) {
-            metrics.requestRateLimited();
-            audit(eventId, senderId, senderName, channel.getId(), options.message(),
-                    "LOCAL_RATE_LIMIT_FAIL_OPEN", "none", 0.0D, 0, 0L);
+        String scopeId = current.centralScopeId().isBlank() ? channel.getId() : current.centralScopeId();
+        CentralModerationEngine.PendingMessage pending = new CentralModerationEngine.PendingMessage(
+                eventId,
+                ChannelProfile.MINECRAFT_PUBLIC,
+                scopeId,
+                channel.getId(),
+                "",
+                List.of(),
+                senderId,
+                senderName,
+                options.message()
+        );
+        if (deliveryTargets.size() >= MAX_DELIVERY_TARGETS) {
             channel.send(options);
             return;
         }
-
-        AiModerationContextBuffer.Snapshot snapshot = runtime.context().record(
-                channel.getId(), eventId, senderId, senderName, options.message()
-        );
-        PendingMessage pending = new PendingMessage(eventId, channel, options, senderId, senderName);
-        this.scheduler.schedule(
-                () -> publishIfPending(pending),
-                current.maximumChatHold().toMillis(),
-                TimeUnit.MILLISECONDS
-        );
-
-        metrics.requestStarted();
-        long started = System.nanoTime();
-        try {
-            activeClient.moderate(snapshot.targetMessage(), snapshot.transcript())
-                    .whenComplete((batch, failure) -> completeInitialRequest(
-                            runtime, pending, snapshot, eventId, senderId, senderName, started, batch, failure
-                    ));
-        } catch (RuntimeException exception) {
-            finishRequest();
-            long latencyMs = elapsedMs(started);
-            if (runtimeFence.isCurrent(runtime.generation())) {
-                metrics.requestFailed(latencyMs);
-                audit(eventId, senderId, senderName, channel.getId(), options.message(),
-                        "API_FAILURE_FAIL_OPEN", rootType(exception), 0.0D, 0, latencyMs);
-                onRequestFailure(exception, current);
-            }
-            publishIfPending(pending);
-        }
+        deliveryTargets.put(eventId, new ChannelDeliveryTarget(channel, options, options.sender()));
+        activeEngine.submit(pending);
     }
 
-    private void completeInitialRequest(
-            RuntimeSnapshot runtime,
-            PendingMessage pending,
-            AiModerationContextBuffer.Snapshot snapshot,
+    /**
+     * Submits one already-filtered private message through the same bounded central engine.
+     *
+     * @return true when central moderation owns publication; false when the caller should fail open immediately
+     */
+    public boolean moderatePrivateAndSend(
             UUID eventId,
-            UUID senderId,
-            String senderName,
-            long started,
-            OpenAiModerationClient.BatchResult batch,
-            Throwable failure
+            RosePlayer sender,
+            RosePlayer recipient,
+            String message,
+            Runnable publisher,
+            Runnable blocked
     ) {
-        finishRequest();
-        long latencyMs = elapsedMs(started);
-        if (!runtimeFence.isCurrent(runtime.generation())) {
-            publishIfPending(pending);
-            return;
+        Objects.requireNonNull(eventId, "eventId");
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(recipient, "recipient");
+        Objects.requireNonNull(message, "message");
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(blocked, "blocked");
+
+        AiModerationConfig current = this.config;
+        CentralModerationEngine activeEngine = this.engine;
+        UUID senderId = sender.getUUID();
+        if (current == null || !current.enabled() || activeEngine == null
+                || !sender.isPlayer() || senderId == null) {
+            return false;
         }
-        if (failure != null) {
-            metrics.requestFailed(latencyMs);
-            audit(eventId, senderId, senderName, pending.channel.getId(), pending.options.message(),
-                    "API_FAILURE_FAIL_OPEN", rootType(failure), 0.0D, 0, latencyMs);
-            onRequestFailure(failure, runtime.config());
-            publishIfPending(pending);
-            return;
+        if (deliveryTargets.size() >= MAX_DELIVERY_TARGETS) {
+            return false;
         }
-        metrics.requestSucceeded(latencyMs);
-        onRequestSuccess();
-        applyVerdict(pending, snapshot, runtime.policy().evaluate(batch), false, latencyMs, runtime);
+
+        UUID recipientId = recipient.getUUID();
+        List<UUID> recipientIds = recipientId == null ? List.of() : List.of(recipientId);
+        String scopeId = current.centralScopeId().isBlank() ? "minecraft-private" : current.centralScopeId();
+        String conversationId = recipientId == null ? "" : privateConversationId(senderId, recipientId);
+        CentralModerationEngine.PendingMessage pending = new CentralModerationEngine.PendingMessage(
+                eventId,
+                ChannelProfile.MINECRAFT_PRIVATE,
+                scopeId,
+                "private",
+                conversationId,
+                recipientIds,
+                senderId,
+                safeName(sender),
+                message,
+                false
+        );
+        deliveryTargets.put(eventId, new PrivateDeliveryTarget(sender, publisher, blocked));
+        activeEngine.submit(pending);
+        return true;
+    }
+
+    private static String privateConversationId(UUID senderId, UUID recipientId) {
+        String first = senderId.toString();
+        String second = recipientId.toString();
+        return first.compareTo(second) <= 0
+                ? "minecraft-private:" + first + ':' + second
+                : "minecraft-private:" + second + ':' + first;
     }
 
     private boolean eligible(Channel channel, ChannelMessageOptions options, AiModerationConfig current) {
@@ -218,323 +287,115 @@ public final class AiModerationManager implements AutoCloseable, Listener {
                 || !options.sender().isPlayer() || options.sender().getUUID() == null) {
             return false;
         }
-        return plugin.getStaffService() == null
-                || plugin.getStaffService().classifyChannel(channel.getId()) == ChannelClassification.PUBLIC;
-    }
-
-    private synchronized RuntimeSnapshot runtimeSnapshot() {
-        return new RuntimeSnapshot(
-                runtimeFence.current(), config, context, policy, strikeStore, client
-        );
-    }
-
-    private boolean reserveRequest(UUID playerId) {
-        Instant now = clock.instant();
-        synchronized (requestWindowLock) {
-            while (!globalRequestWindow.isEmpty()
-                    && globalRequestWindow.peekFirst().isBefore(now.minusSeconds(60))) {
-                globalRequestWindow.removeFirst();
-            }
-            Deque<Instant> playerWindow = playerRequestWindows.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
-            while (!playerWindow.isEmpty() && playerWindow.peekFirst().isBefore(now.minusSeconds(10))) {
-                playerWindow.removeFirst();
-            }
-            if (globalRequestWindow.size() >= SAFE_GLOBAL_REQUESTS_PER_MINUTE
-                    || playerWindow.size() >= SAFE_PLAYER_REQUESTS_PER_TEN_SECONDS
-                    || inFlightRequests.get() >= MAX_IN_FLIGHT_REQUESTS) {
-                return false;
-            }
-            globalRequestWindow.addLast(now);
-            playerWindow.addLast(now);
-            inFlightRequests.incrementAndGet();
+        if (plugin.getStaffService() == null) {
             return true;
         }
-    }
-
-    private void finishRequest() {
-        inFlightRequests.updateAndGet(value -> Math.max(0, value - 1));
-    }
-
-    private boolean circuitOpen() {
-        return this.circuitOpenUntil.isAfter(clock.instant());
-    }
-
-    private void applyVerdict(
-            PendingMessage pending,
-            AiModerationContextBuffer.Snapshot snapshot,
-            AiModerationPolicy.Verdict verdict,
-            boolean followUp,
-            long latencyMs,
-            RuntimeSnapshot runtime
-    ) {
-        if (!runtimeFence.isCurrent(runtime.generation())) {
-            publishIfPending(pending);
-            return;
+        ChannelClassification classification = plugin.getStaffService().classifyChannel(channel.getId());
+        ChannelProfile profile = ChannelProfile.forClassification(classification);
+        if (profile == ChannelProfile.EXEMPT) {
+            return false;
         }
-        AiModerationConfig current = runtime.config();
-        if (current.shadowMode()) {
-            publishIfPending(pending);
-            if (verdict.action() != AiModerationPolicy.Action.ALLOW) {
-                metrics.shadowFlagged();
-                alertStaff("[AI shadow] " + pending.senderName + " would be " + verdict.action()
-                        + " for " + verdict.category() + " (severity " + verdict.severity() + ").");
+        return profile == ChannelProfile.MINECRAFT_PUBLIC;
+    }
+
+    private final class EngineActions implements CentralModerationEngine.Actions {
+        @Override
+        public void publish(CentralModerationEngine.PendingMessage pending) {
+            DeliveryTarget target = deliveryTargets.remove(pending.eventId);
+            if (target == null) {
+                return;
             }
-            auditVerdict(pending, verdict, (followUp ? "FOLLOWUP_SHADOW_" : "SHADOW_") + verdict.action(), latencyMs);
-        } else if (verdict.action() == AiModerationPolicy.Action.DELETE) {
-            enforceDelete(pending, verdict, latencyMs, followUp, current, runtime.strikeStore());
-        } else {
-            publishIfPending(pending);
-            if (verdict.action() == AiModerationPolicy.Action.ALERT_ONLY) {
-                metrics.alerted();
-                alertStaff("AI moderation flagged " + pending.senderName + " for staff review: "
-                        + verdict.category() + " (severity " + verdict.severity() + ").");
-                notifyPlayer(pending.senderId, "Your message was flagged for staff review by chat moderation.");
-            } else {
-                metrics.allowed();
+            if (target instanceof ChannelDeliveryTarget channelTarget) {
+                Set<UUID> beforeMessageIds = messageIds(channelTarget.sender());
+                channelTarget.channel().send(channelTarget.options());
+                beginResolvePublishedUuid(pending, channelTarget, beforeMessageIds, 0);
+                return;
             }
-            auditVerdict(pending, verdict, (followUp ? "FOLLOWUP_" : "") + verdict.action(), latencyMs);
-        }
-
-        if (!followUp && verdict.followUpUseful()) {
-            this.scheduler.schedule(
-                    () -> followUp(pending, snapshot, runtime),
-                    current.followUpDelay().toMillis(),
-                    TimeUnit.MILLISECONDS
-            );
-        }
-    }
-
-    private void followUp(
-            PendingMessage pending,
-            AiModerationContextBuffer.Snapshot original,
-            RuntimeSnapshot runtime
-    ) {
-        if (!runtimeFence.isCurrent(runtime.generation()) || pending.enforced.get() || circuitOpen()) {
-            return;
-        }
-        OpenAiModerationClient activeClient = runtime.client();
-        if (activeClient == null) {
-            return;
-        }
-        AiModerationContextBuffer.Snapshot later = runtime.context()
-                .snapshot(original.channelId(), original.eventId())
-                .orElse(null);
-        if (later == null || !later.hasAfterContext()) {
-            return;
-        }
-        if (!reserveRequest(pending.senderId)) {
-            metrics.requestRateLimited();
-            audit(pending.eventId, pending.senderId, pending.senderName, pending.channel.getId(), pending.options.message(),
-                    "FOLLOWUP_RATE_LIMITED", "none", 0.0D, 0, 0L);
-            return;
-        }
-        metrics.requestStarted();
-        long started = System.nanoTime();
-        try {
-            activeClient.moderate(later.targetMessage(), later.transcript())
-                    .whenComplete((batch, failure) -> completeFollowUp(runtime, pending, later, started, batch, failure));
-        } catch (RuntimeException exception) {
-            finishRequest();
-            if (runtimeFence.isCurrent(runtime.generation())) {
-                metrics.requestFailed(elapsedMs(started));
-                onRequestFailure(exception, runtime.config());
+            if (target instanceof PrivateDeliveryTarget privateTarget) {
+                Bukkit.getScheduler().runTask(plugin, privateTarget.publisher());
             }
         }
-    }
 
-    private void completeFollowUp(
-            RuntimeSnapshot runtime,
-            PendingMessage pending,
-            AiModerationContextBuffer.Snapshot later,
-            long started,
-            OpenAiModerationClient.BatchResult batch,
-            Throwable failure
-    ) {
-        finishRequest();
-        long latencyMs = elapsedMs(started);
-        if (!runtimeFence.isCurrent(runtime.generation())) {
-            return;
+        @Override
+        public void notifyBlocked(UUID senderId, String notice) {
+            notifyPlayer(senderId, notice);
         }
-        if (failure != null) {
-            metrics.requestFailed(latencyMs);
-            audit(pending.eventId, pending.senderId, pending.senderName,
-                    pending.channel.getId(), pending.options.message(),
-                    "FOLLOWUP_API_FAILURE", rootType(failure), 0.0D, 0, latencyMs);
-            onRequestFailure(failure, runtime.config());
-            return;
-        }
-        metrics.requestSucceeded(latencyMs);
-        onRequestSuccess();
-        applyVerdict(pending, later, runtime.policy().evaluate(batch), true, latencyMs, runtime);
-    }
 
-    private void publishIfPending(PendingMessage pending) {
-        if (!pending.state.compareAndSet(MessageState.PENDING, MessageState.PUBLISHED)) {
-            return;
+        @Override
+        public void notifyRemoved(UUID senderId, String notice) {
+            notifyPlayer(senderId, notice);
         }
-        pending.beforeMessageIds.addAll(messageIds(pending.options.sender()));
-        pending.channel.send(pending.options);
-        resolvePublishedMessageId(pending, 0);
-    }
 
-    private void enforceDelete(
-            PendingMessage pending,
-            AiModerationPolicy.Verdict verdict,
-            long latencyMs,
-            boolean followUp,
-            AiModerationConfig current,
-            AiModerationStrikeStore activeStrikeStore
-    ) {
-        if (!pending.enforced.compareAndSet(false, true)) {
-            return;
+        @Override
+        public void deleteExactMessage(UUID rosechatMessageId) {
+            Bukkit.getScheduler().runTask(plugin, () -> deletePublishedOnServerThread(rosechatMessageId));
         }
-        MessageState previous = pending.state.getAndUpdate(state ->
-                state == MessageState.PENDING ? MessageState.BLOCKED : state);
-        boolean late = previous == MessageState.PUBLISHED;
-        metrics.deleted(late);
-        if (previous == MessageState.PENDING) {
-            notifyPlayer(pending.senderId, enforcementNotice("blocked", verdict));
-        } else if (late) {
-            pending.deleteRequested.set(true);
-            UUID messageId = pending.publishedMessageId.get();
-            if (messageId != null) {
-                deletePublishedOnce(pending, messageId);
+
+        @Override
+        public void alertStaff(String detail) {
+            alertStaffRaw(staffAlertPrefix()
+                    + COLOR_GOLD + COLOR_BOLD + "AI" + COLOR_RESET
+                    + COLOR_DARK_GRAY + " • " + COLOR_GRAY + detail);
+        }
+
+        @Override
+        public void audit(CentralModerationEngine.AuditRecord record) {
+            if ("CENTRAL_BLOCK_PRE_BROADCAST".equals(record.outcome())) {
+                DeliveryTarget target = deliveryTargets.remove(record.eventId());
+                if (target instanceof PrivateDeliveryTarget privateTarget) {
+                    Bukkit.getScheduler().runTask(plugin, privateTarget.blocked());
+                }
             }
-            notifyPlayer(pending.senderId, enforcementNotice("removed", verdict));
-        }
-        auditVerdict(pending, verdict,
-                (followUp ? "FOLLOWUP_" : "") + (late ? "DELETE_LATE" : "DELETE_PRE_BROADCAST"), latencyMs);
-        alertStaff("AI moderation " + (late ? "removed" : "blocked") + " a public message from "
-                + pending.senderName + ": " + verdict.category() + " (severity " + verdict.severity() + ").");
-        if (current.punishmentsEnabled()) {
-            recordStrike(pending, verdict, current, activeStrikeStore);
+            AiModerationAuditStore store = auditStore;
+            if (store == null) {
+                return;
+            }
+            store.record(new AiModerationAuditStore.Entry(
+                    record.at(), record.eventId(), record.senderId(), record.senderName(), record.channelId(),
+                    record.text(), record.outcome(), record.semanticLabel(),
+                    record.confidence() == null ? 0.0D : record.confidence(), 0, record.latencyMs()
+            ));
         }
     }
 
-    private String enforcementNotice(String action, AiModerationPolicy.Verdict verdict) {
-        return "Your public message was " + action + " by AI moderation ("
-                + verdict.category() + ", severity " + verdict.severity() + "/100).";
-    }
-
-    private void recordStrike(
-            PendingMessage pending,
-            AiModerationPolicy.Verdict verdict,
-            AiModerationConfig current,
-            AiModerationStrikeStore activeStrikeStore
+    private void beginResolvePublishedUuid(
+            CentralModerationEngine.PendingMessage pending,
+            ChannelDeliveryTarget target,
+            Set<UUID> beforeMessageIds,
+            int attempt
     ) {
-        Instant now = clock.instant();
-        AiModerationStrikeStore.RecordResult result = activeStrikeStore.record(
-                pending.senderId,
-                pending.eventId,
-                pending.options.message(),
-                verdict.category(),
-                verdict.confidence(),
-                verdict.severity()
-        );
-        int count = result.count();
-        if (count < current.requiredStrikes()) {
-            notifyPlayer(pending.senderId, "AI moderation strike " + count + "/" + current.requiredStrikes()
-                    + ". Another enforcement within " + current.strikeWindow().toMinutes()
-                    + " minutes can result in a " + current.muteDuration().toDays() + "-day public mute.");
-            return;
-        }
-        Instant existing = muteRequestedUntil.get(pending.senderId);
-        if (existing != null && existing.isAfter(now)) {
-            return;
-        }
-        requestStaffMute(pending, verdict, count, result.evidence(), now, current);
-    }
-
-    private void requestStaffMute(
-            PendingMessage pending,
-            AiModerationPolicy.Verdict verdict,
-            int count,
-            List<AiModerationStrikeStore.StrikeEvidence> strikeEvidence,
-            Instant now,
-            AiModerationConfig current
-    ) {
-        RoseChatAutomatedModerationService service = Bukkit.getServicesManager()
-                .load(RoseChatAutomatedModerationService.class);
-        if (service == null || service.apiVersion() != RoseChatAutomatedModerationService.API_VERSION) {
-            alertStaff("AI moderation reached the public-mute threshold for " + pending.senderName
-                    + ", but the EnthusiaStaff automated moderation service is unavailable or uses an older API contract.");
-            return;
-        }
-        List<AutomatedModerationEvidence> evidence = strikeEvidence.stream()
-                .map(item -> new AutomatedModerationEvidence(
-                        item.eventId(),
-                        item.at(),
-                        item.message(),
-                        item.category(),
-                        item.confidence(),
-                        item.severity()
-                ))
-                .toList();
-        AutomatedPublicMuteRequest request = new AutomatedPublicMuteRequest(
-                pending.senderId,
-                pending.senderName,
-                pending.eventId,
-                verdict.category(),
-                verdict.severity(),
-                count,
-                current.muteDuration(),
-                "rosechat-ai:" + pending.eventId,
-                evidence
-        );
-        AutomatedModerationResult moderationResult;
-        try {
-            moderationResult = service.applyPublicMute(request);
-        } catch (RuntimeException | LinkageError exception) {
-            plugin.getLogger().warning("EnthusiaStaff automated public mute failed: " + exception.getClass().getSimpleName());
-            alertStaff("AI moderation could not apply the " + current.muteDuration().toDays()
-                    + "-day public mute for " + pending.senderName + "; EnthusiaStaff integration failed.");
-            return;
-        }
-        if (moderationResult != null && moderationResult.status() == AutomatedModerationResult.Status.APPLIED) {
-            muteRequestedUntil.put(pending.senderId, now.plus(current.muteDuration()));
-            notifyPlayer(pending.senderId, "You have been publicly muted for " + current.muteDuration().toDays()
-                    + " days after " + count + " AI moderation enforcement strikes within "
-                    + current.strikeWindow().toMinutes() + " minutes.");
-            alertStaff("EnthusiaStaff applied the AI moderation public mute for " + pending.senderName + ".");
-        } else {
-            String detail = moderationResult == null ? "no result" : moderationResult.status() + ": " + moderationResult.detail();
-            alertStaff("AI moderation reached the public-mute threshold for " + pending.senderName
-                    + ", but EnthusiaStaff did not apply it (" + detail + ").");
-        }
-    }
-
-    private void resolvePublishedMessageId(PendingMessage pending, int attempt) {
         Bukkit.getScheduler().runTask(plugin, () -> {
-            UUID resolved = uniqueNewMessageId(pending);
+            UUID resolved = uniqueNewMessageId(target, beforeMessageIds);
             if (resolved != null) {
-                pending.publishedMessageId.compareAndSet(null, resolved);
-                if (pending.deleteRequested.get()) {
-                    deletePublishedOnce(pending, resolved);
+                CentralModerationEngine activeEngine = engine;
+                if (activeEngine != null) {
+                    activeEngine.notePublished(pending.externalMessageId, resolved);
+                    activeEngine.registerMirrorAlias(pending.canonicalMessageId, pending.externalMessageId);
                 }
                 return;
             }
             if (attempt < 8) {
-                scheduler.schedule(() -> resolvePublishedMessageId(pending, attempt + 1), 50, TimeUnit.MILLISECONDS);
-            } else if (pending.deleteRequested.get()) {
-                alertStaff("AI moderation flagged a message after broadcast, but RoseChat could not uniquely identify its message UUID for late deletion.");
+                scheduler.schedule(
+                        () -> beginResolvePublishedUuid(pending, target, beforeMessageIds, attempt + 1),
+                        50, TimeUnit.MILLISECONDS);
             }
         });
     }
 
-    private UUID uniqueNewMessageId(PendingMessage pending) {
-        if (pending.options.sender().getPlayerData() == null) {
+    private UUID uniqueNewMessageId(ChannelDeliveryTarget target, Set<UUID> beforeMessageIds) {
+        if (target.sender().getPlayerData() == null) {
             return null;
         }
-        List<DeletableMessage> messages = pending.options.sender().getPlayerData().getMessageLog().getDeletableMessages();
+        List<DeletableMessage> messages = target.sender().getPlayerData().getMessageLog().getDeletableMessages();
         UUID candidate = null;
         synchronized (messages) {
             for (int i = messages.size() - 1; i >= 0; i--) {
                 DeletableMessage message = messages.get(i);
-                if (pending.beforeMessageIds.contains(message.getUUID())) {
+                if (beforeMessageIds.contains(message.getUUID())) {
                     continue;
                 }
-                if (!Objects.equals(message.getSender(), pending.senderId)
-                        || !Objects.equals(message.getChannel(), pending.channel.getId())) {
+                if (!Objects.equals(message.getSender(), target.sender().getUUID())
+                        || !Objects.equals(message.getChannel(), target.channel().getId())) {
                     continue;
                 }
                 if (candidate != null && !candidate.equals(message.getUUID())) {
@@ -560,14 +421,7 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         return ids;
     }
 
-    private void deletePublishedOnce(PendingMessage pending, UUID messageId) {
-        if (!pending.deletionDispatched.compareAndSet(false, true)) {
-            return;
-        }
-        Bukkit.getScheduler().runTask(plugin, () -> deletePublishedOnServerThread(pending, messageId));
-    }
-
-    private void deletePublishedOnServerThread(PendingMessage pending, UUID messageId) {
+    private void deletePublishedOnServerThread(UUID messageId) {
         boolean discordIdMissingBeforeDelete = findDiscordId(messageId) == null;
         for (Player player : new ArrayList<>(Bukkit.getOnlinePlayers())) {
             RosePlayer rosePlayer = new RosePlayer(player);
@@ -575,18 +429,22 @@ public final class AiModerationManager implements AutoCloseable, Listener {
                 RoseChatAPI.getInstance().deleteMessage(rosePlayer, messageId);
             }
         }
-        propagateNetworkDeletion(pending, messageId);
+        propagateNetworkDeletion(messageId);
         if (discordIdMissingBeforeDelete && Settings.DELETE_DISCORD_MESSAGES.get()) {
             retryDiscordDeletion(messageId, 0);
         }
     }
 
-    private void propagateNetworkDeletion(PendingMessage pending, UUID messageId) {
+    private void propagateNetworkDeletion(UUID messageId) {
         RoseChatAPI api = RoseChatAPI.getInstance();
         if (!api.isBungee()) {
             return;
         }
-        for (String server : pending.channel.getServers()) {
+        Set<String> servers = new HashSet<>();
+        for (Channel channel : api.getChannels()) {
+            servers.addAll(channel.getServers());
+        }
+        for (String server : servers) {
             api.getBungeeManager().sendMessageDeletion(server, messageId);
         }
     }
@@ -623,68 +481,6 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         return null;
     }
 
-    private void onRequestSuccess() {
-        consecutiveFailures.set(0);
-        Health prior = health.getAndSet(new Health(Status.HEALTHY, "OpenAI moderation responding"));
-        if (prior.status() == Status.DOWN) {
-            alertStaff("AI chat moderation recovered; normal moderation requests have resumed.");
-        }
-    }
-
-    private void onRequestFailure(Throwable failure, AiModerationConfig current) {
-        int failures = consecutiveFailures.incrementAndGet();
-        String reason = rootType(failure);
-        if (failures >= current.failuresToOpen()) {
-            circuitOpenUntil = clock.instant().plus(current.circuitOpenDuration());
-            Health prior = health.getAndSet(new Health(Status.DOWN,
-                    reason + "; circuit open until " + circuitOpenUntil));
-            if (prior.status() != Status.DOWN) {
-                alertStaff("AI chat moderation is DOWN and chat is fail-open. Reason: " + reason + '.');
-            }
-        } else {
-            health.set(new Health(Status.DEGRADED, reason));
-        }
-    }
-
-    private void auditVerdict(PendingMessage pending, AiModerationPolicy.Verdict verdict, String outcome, long latencyMs) {
-        audit(pending.eventId, pending.senderId, pending.senderName, pending.channel.getId(), pending.options.message(),
-                outcome, verdict.category(), verdict.confidence(), verdict.severity(), latencyMs);
-    }
-
-    private void audit(
-            UUID eventId,
-            UUID playerId,
-            String playerName,
-            String channel,
-            String message,
-            String outcome,
-            String category,
-            double confidence,
-            int severity,
-            long latencyMs
-    ) {
-        AiModerationAuditStore store = this.auditStore;
-        if (store == null) {
-            return;
-        }
-        store.record(new AiModerationAuditStore.Entry(
-                clock.instant(), eventId, playerId, playerName, channel, message,
-                outcome, category, confidence, severity, latencyMs
-        ));
-    }
-
-    private static long elapsedMs(long startedNanos) {
-        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
-    }
-
-    private static String rootType(Throwable throwable) {
-        Throwable current = throwable;
-        while (current instanceof CompletionException && current.getCause() != null) {
-            current = current.getCause();
-        }
-        return current.getClass().getSimpleName();
-    }
-
     private void notifyPlayer(UUID playerId, String message) {
         Bukkit.getScheduler().runTask(plugin, () -> {
             Player player = Bukkit.getPlayer(playerId);
@@ -694,47 +490,84 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         });
     }
 
-    private void alertStaff(String message) {
+    private void alertStaffRaw(String formattedMessage) {
+        AiModerationConfig current = this.config;
+        String permission = current == null ? "rosechat.ai.alerts" : current.staffStatusPermission();
         Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getOnlinePlayers().stream()
-                .filter(player -> player.hasPermission(config.staffStatusPermission()))
-                .forEach(player -> player.sendMessage(message)));
+                .filter(player -> player.hasPermission(permission))
+                .forEach(player -> player.sendMessage(formattedMessage)));
+    }
+
+    private static String staffAlertPrefix() {
+        return COLOR_DARK_GRAY + '[' + COLOR_AQUA + COLOR_BOLD + "AI MOD"
+                + COLOR_RESET + COLOR_DARK_GRAY + "] ";
     }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         AiModerationConfig current = this.config;
         Health currentHealth = this.health.get();
-        if (!current.enabled() || currentHealth.status() == Status.HEALTHY
+        if (current == null || !current.enabled() || currentHealth.status() == Status.HEALTHY
                 || !event.getPlayer().hasPermission(current.staffStatusPermission())) {
             return;
         }
-        event.getPlayer().sendMessage("AI CHAT MODERATION " + currentHealth.status()
-                + " - chat is fail-open. " + currentHealth.detail());
+        event.getPlayer().sendMessage(staffAlertPrefix()
+                + COLOR_RED + COLOR_BOLD + "FAIL-OPEN" + COLOR_RESET
+                + COLOR_DARK_GRAY + " • " + COLOR_GRAY + currentHealth.status()
+                + ": " + currentHealth.detail());
     }
 
     public Health health() {
-        return health.get();
+        CentralModerationEngine activeEngine = this.engine;
+        Health base = health.get();
+        if (activeEngine == null) {
+            return base;
+        }
+        CentralModerationEngine.EngineHealth engineHealth = activeEngine.health();
+        AiModerationMetrics.Snapshot snapshot = metrics.snapshot();
+        String detail = base.detail()
+                + " | circuit=" + (engineHealth.circuitOpen() ? "OPEN" : "closed")
+                + " inFlight=" + engineHealth.inFlight()
+                + " allow=" + snapshot.allows() + " block=" + snapshot.centralBlocked()
+                + " timeout=" + snapshot.centralTimeouts() + " conflict=" + snapshot.centralConflicts()
+                + " degraded=" + snapshot.centralDegraded()
+                + " p95=" + snapshot.p95LatencyMs() + "ms"
+                + (engineHealth.lastPolicyVersion().isBlank() ? ""
+                        : " policy=" + engineHealth.lastPolicyVersion())
+                + (engineHealth.lastModelVersion().isBlank() ? ""
+                        : " model=" + engineHealth.lastModelVersion())
+                + (engineHealth.lastFailureCategory().isBlank() ? ""
+                        : " lastFailure=" + engineHealth.lastFailureCategory());
+        Status status = base.status();
+        if (engineHealth.circuitOpen()) {
+            status = Status.DOWN;
+        } else if (engineHealth.consecutiveFailures() > 0) {
+            status = Status.DEGRADED;
+        }
+        return new Health(status, detail);
     }
 
     public AiModerationMetrics.Snapshot metrics() {
         return metrics.snapshot();
     }
 
-    @Override
-    public void close() {
-        scheduler.shutdownNow();
+    /**
+     * @return the active central engine, or {@code null} when central mode is
+     * not active (chat fails open with no semantic moderation).
+     */
+    CentralModerationEngine centralEngine() {
+        return engine;
     }
 
-    private String resolveApiKey(AiModerationConfig loaded) {
-        File file = new File(plugin.getDataFolder(), "ai-moderation.yml");
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
-        String configured = yaml.getString("api-key", "");
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
+    @Override
+    public void close() {
+        CentralModerationEngine activeEngine = this.engine;
+        if (activeEngine != null) {
+            activeEngine.retire();
+            this.engine = null;
         }
-
-        String environment = System.getenv(loaded.apiKeyEnvironmentVariable());
-        return environment == null ? "" : environment.trim();
+        scheduler.shutdownNow();
+        networkExecutor.shutdownNow();
     }
 
     private static String safeName(RosePlayer player) {
@@ -760,53 +593,21 @@ public final class AiModerationManager implements AutoCloseable, Listener {
         }
     }
 
-    private record RuntimeSnapshot(
-            long generation,
-            AiModerationConfig config,
-            AiModerationContextBuffer context,
-            AiModerationPolicy policy,
-            AiModerationStrikeStore strikeStore,
-            OpenAiModerationClient client
-    ) {
-        private RuntimeSnapshot {
-            Objects.requireNonNull(config, "config");
-            Objects.requireNonNull(context, "context");
-            Objects.requireNonNull(policy, "policy");
-            Objects.requireNonNull(strikeStore, "strikeStore");
-        }
+    private sealed interface DeliveryTarget permits ChannelDeliveryTarget, PrivateDeliveryTarget {
+        RosePlayer sender();
     }
 
-    private enum MessageState {
-        PENDING,
-        PUBLISHED,
-        BLOCKED
+    private record ChannelDeliveryTarget(
+            Channel channel,
+            ChannelMessageOptions options,
+            RosePlayer sender
+    ) implements DeliveryTarget {
     }
 
-    private static final class PendingMessage {
-        private final UUID eventId;
-        private final Channel channel;
-        private final ChannelMessageOptions options;
-        private final UUID senderId;
-        private final String senderName;
-        private final AtomicReference<MessageState> state = new AtomicReference<>(MessageState.PENDING);
-        private final AtomicBoolean enforced = new AtomicBoolean();
-        private final AtomicBoolean deleteRequested = new AtomicBoolean();
-        private final AtomicBoolean deletionDispatched = new AtomicBoolean();
-        private final AtomicReference<UUID> publishedMessageId = new AtomicReference<>();
-        private final Set<UUID> beforeMessageIds = ConcurrentHashMap.newKeySet();
-
-        private PendingMessage(
-                UUID eventId,
-                Channel channel,
-                ChannelMessageOptions options,
-                UUID senderId,
-                String senderName
-        ) {
-            this.eventId = eventId;
-            this.channel = channel;
-            this.options = options;
-            this.senderId = senderId;
-            this.senderName = senderName;
-        }
+    private record PrivateDeliveryTarget(
+            RosePlayer sender,
+            Runnable publisher,
+            Runnable blocked
+    ) implements DeliveryTarget {
     }
 }
