@@ -1,9 +1,9 @@
 package dev.rosewood.rosechat.listener;
 
 import dev.rosewood.rosegarden.utils.StringPlaceholders;
-import java.io.InputStreamReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -27,12 +27,13 @@ class DiscordIdentityPlaceholdersTest {
                 .build().apply("%discord_linked%/%user_nickname%"));
     }
 
-    @Test void defaultFormatUsesMinecraftPrefixOnlyForLinkedAccounts() {
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(new InputStreamReader(
-                getClass().getResourceAsStream("/custom-placeholders.yml"), StandardCharsets.UTF_8));
-        assertEquals("&6[D]&r ", yaml.getString("from-discord.text.default"));
-        assertEquals("%discord_linked%", yaml.getString("discord-player.text.condition"));
-        assertEquals("{prefix}%user_nickname%", yaml.getString("discord-player.text.true"));
-        assertEquals("&7%user_nickname%", yaml.getString("discord-player.text.default"));
+    @Test void defaultFormatUsesMinecraftPrefixOnlyForLinkedAccounts() throws IOException {
+        try (InputStream input = getClass().getResourceAsStream("/custom-placeholders.yml")) {
+            assertNotNull(input);
+            String yaml = new String(input.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n");
+            assertTrue(yaml.contains("from-discord:\n  text:\n    default: \"&6[D]&r \""));
+            assertTrue(yaml.contains("discord-player:\n  text:\n    condition: \"%discord_linked%\"\n"
+                    + "    true: \"{prefix}%user_nickname%\"\n    default: \"&7%user_nickname%\""));
+        }
     }
 }
