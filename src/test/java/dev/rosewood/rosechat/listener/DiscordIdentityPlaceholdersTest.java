@@ -3,7 +3,9 @@ package dev.rosewood.rosechat.listener;
 import dev.rosewood.rosegarden.utils.StringPlaceholders;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import dev.rosewood.rosegarden.config.CommentedFileConfiguration;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -30,10 +32,11 @@ class DiscordIdentityPlaceholdersTest {
     @Test void defaultFormatUsesMinecraftPrefixOnlyForLinkedAccounts() throws IOException {
         try (InputStream input = getClass().getResourceAsStream("/custom-placeholders.yml")) {
             assertNotNull(input);
-            String yaml = new String(input.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n");
-            assertTrue(yaml.contains("from-discord:\n  text:\n    default: \"&6[D]&r \""));
-            assertTrue(yaml.contains("discord-player:\n  text:\n    condition: \"%discord_linked%\"\n"
-                    + "    true: \"{prefix}%user_nickname%\"\n    default: \"&7%user_nickname%\""));
+            var yaml = CommentedFileConfiguration.loadConfiguration(new InputStreamReader(input, StandardCharsets.UTF_8));
+            assertEquals("&6[D]&r ", yaml.getString("from-discord.text.default"));
+            assertEquals("%discord_linked%", yaml.getString("discord-player.text.condition"));
+            assertEquals("{prefix}%user_nickname%", yaml.getString("discord-player.text.true"));
+            assertEquals("&7%user_nickname%", yaml.getString("discord-player.text.default"));
         }
     }
 }

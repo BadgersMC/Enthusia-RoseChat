@@ -8,9 +8,12 @@ neutral gray nickname and do not receive a Minecraft rank identity.
 role or user-supplied message. Existing channel permissions and delivery remain
 unchanged. PlaceholderAPI/LuckPerms must provide the existing prefix.
 
-Existing installations must merge the `from-discord` and `discord-player` text
-entries from `custom-placeholders.yml`; plugin defaults do not overwrite existing
-files. Channels should use:
+On reload, missing `from-discord`/`discord-player` entries or missing text sections
+are filled from the bundled defaults. Text sections containing only the exact old
+bundled default are upgraded. Customized text (including explicitly empty text),
+extra conditions, hover/click entries and unrelated placeholders are retained.
+Custom installations still need an operator-reviewed manual format change.
+Channels should use:
 
 ```yaml
 discord-to-minecraft: '{from-discord}{discord-player}{separator}{message}'
