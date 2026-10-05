@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class OutboundChatBridgeCoordinatorTest {
@@ -36,6 +37,27 @@ class OutboundChatBridgeCoordinatorTest {
                 coordinator.publish(message(UUID.randomUUID(), ChannelClassification.PUBLIC,
                         OutboundChatMessage.Origin.MINECRAFT, "hello")));
         assertEquals(1, deliveries.get());
+    }
+
+    /** Verifies that W13 hands stable central IDs to the provider-neutral W14 boundary unchanged. */
+    @Test
+    void carriesCanonicalModerationIdsAcrossBridgeBoundary() {
+        OutboundChatBridgeCoordinator coordinator = coordinator();
+        AtomicReference<OutboundChatMessage> delivered = new AtomicReference<>();
+        coordinator.install(delivered::set);
+        UUID eventId = UUID.randomUUID();
+        OutboundChatMessage outbound = message(
+                eventId,
+                ChannelClassification.PUBLIC,
+                OutboundChatMessage.Origin.MINECRAFT,
+                "canonical"
+        );
+
+        assertEquals(OutboundChatBridgeCoordinator.DispatchResult.DELIVERED,
+                coordinator.publish(outbound));
+
+        assertEquals("rosechat-mc-" + eventId, delivered.get().externalMessageId());
+        assertEquals("rosechat-canonical-" + eventId, delivered.get().canonicalMessageId());
     }
 
     /** Verifies that provider failure is contained and does not throw into Minecraft chat. */
@@ -106,8 +128,12 @@ class OutboundChatBridgeCoordinatorTest {
     void rejectsExpiredAndOversizePayloads() {
         OutboundChatBridgeCoordinator coordinator = coordinator();
         coordinator.install(message -> { });
+        UUID expiredId = UUID.randomUUID();
         OutboundChatMessage expired = new OutboundChatMessage(
-                UUID.randomUUID(), NOW - 2_000, NOW - 1_000, "global", ChannelClassification.PUBLIC,
+                expiredId,
+                "rosechat-mc-" + expiredId,
+                "rosechat-canonical-" + expiredId,
+                NOW - 2_000, NOW - 1_000, "global", ChannelClassification.PUBLIC,
                 OutboundChatMessage.Origin.MINECRAFT, UUID.randomUUID(), "Player", "old");
 
         assertEquals(OutboundChatBridgeCoordinator.DispatchResult.EXPIRED, coordinator.publish(expired));
@@ -228,6 +254,8 @@ class OutboundChatBridgeCoordinatorTest {
     ) {
         return new OutboundChatMessage(
                 eventId,
+                "rosechat-mc-" + eventId,
+                "rosechat-canonical-" + eventId,
                 NOW,
                 NOW + 5_000,
                 "global",
