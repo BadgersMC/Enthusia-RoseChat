@@ -43,6 +43,9 @@ The canonical GitHub Actions workflow builds RoseChat independently from LumaGui
 
 ### Filtering and placeholder policy
 
+- `DiscordPlaceholderDefaultsTest` — missing/legacy Discord text upgrade, custom and empty text preservation, comments, persisted reload and idempotence.
+- `DiscordRankRenderingTest` — linked and unlinked shipped text through recursive RoseChat placeholder, color/format tokenizers and plain composition. Tests isolate plugin/PAPI/Bukkit-version boundaries and omit server-bound hover ItemStacks; real account linkage, rank provider and client delivery remain runtime gates.
+
 - `FilterWarningTest` — stable locale keys for caps/spam/URL/language warnings.
 - `OperatorTest` — case-insensitive equality/contains, all numeric comparison boundaries, stable symbols, and malformed-input fail-closed behavior.
 
